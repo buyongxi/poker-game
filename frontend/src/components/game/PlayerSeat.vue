@@ -19,6 +19,9 @@
           <span v-if="isMe" class="me-badge">我</span>
         </div>
         <div class="player-chips">{{ player?.chips ?? seat.chips }}</div>
+        <div class="player-net" :class="seat.net_chips >= 0 ? 'net-positive' : 'net-negative'">
+          净: {{ seat.net_chips >= 0 ? '+' : '' }}{{ seat.net_chips }}
+        </div>
         <div class="player-bet" v-if="player?.current_bet">
           下注: {{ player.current_bet }}
         </div>
@@ -172,6 +175,18 @@ function getSuitSymbol(suit: string) {
 .player-chips {
   font-size: 14px;
   color: #ffd700;
+}
+
+.player-net {
+  font-size: 11px;
+}
+
+.player-net.net-positive {
+  color: #67c23a;
+}
+
+.player-net.net-negative {
+  color: #f56c6c;
 }
 
 .player-bet {

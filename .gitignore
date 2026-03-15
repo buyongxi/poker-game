@@ -47,6 +47,9 @@ env/
 *.log
 logs/
 
+# PIDs
+.pids/
+
 # OS
 .DS_Store
 Thumbs.db

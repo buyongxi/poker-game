@@ -35,13 +35,11 @@ export interface Room {
   max_buyin: number
   owner_id: number
   status: 'idle' | 'waiting' | 'playing'
-  created_at: string
   seats: Seat[]
   player_count: number
 }
 
 export interface Seat {
-  id: number
   seat_index: number
   user_id: number | null
   user_name: string | null
@@ -104,6 +102,8 @@ export interface GameState {
   players: PlayerState[]
   winners: WinnerInfo[]
   is_active: boolean
+  action_timeout?: number
+  remaining_time?: number
 }
 
 export interface WinnerInfo {

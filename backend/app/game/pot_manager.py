@@ -54,26 +54,31 @@ class PotManager:
         """Get player's total bet in hand."""
         return self.player_total_bets.get(user_id, 0)
 
-    def calculate_pots(self, active_players: List[int], all_in_players: List[int]) -> List[Pot]:
+    def calculate_pots(self, active_players: List[int], all_in_players: List[int], folded_players: List[int] = None) -> List[Pot]:
         """
         Calculate main pot and side pots based on all-in situations.
 
         Args:
             active_players: Players still in the hand (not folded)
             all_in_players: Players who are all-in
+            folded_players: Players who have folded (their bets stay in pot but they can't win)
 
         Returns:
             List of pots with eligible players
         """
         self.pots = []
+        folded_players = folded_players or []
 
         if not active_players:
             return self.pots
 
-        # Get all unique bet levels from all-in players
+        # Get all players who contributed to the pot (including folded)
+        all_contributors = list(set(active_players + all_in_players + folded_players))
+
+        # Get all unique bet levels from all contributors
         bet_levels = sorted(set(
             self.player_total_bets.get(pid, 0)
-            for pid in all_in_players + active_players
+            for pid in all_contributors
             if self.player_total_bets.get(pid, 0) > 0
         ))
 
@@ -85,20 +90,22 @@ class PotManager:
             pot = Pot()
             pot_amount = 0
 
-            for player_id in active_players + all_in_players:
+            # Include ALL players' contributions (including folded)
+            for player_id in all_contributors:
                 player_total = self.player_total_bets.get(player_id, 0)
                 if player_total > prev_level:
                     # This player contributed at this level
                     contribution = min(level, player_total) - prev_level
                     pot_amount += contribution
 
-                    # Player is eligible if they haven't folded
-                    if player_id in active_players or player_id in all_in_players:
-                        if player_id not in pot.eligible_players:
-                            pot.eligible_players.append(player_id)
-
+            # Eligibility: only active and all-in players can win
             if pot_amount > 0:
                 pot.amount = pot_amount
+                # Only active and all-in players are eligible to win
+                for player_id in active_players + all_in_players:
+                    player_total = self.player_total_bets.get(player_id, 0)
+                    if player_total > prev_level and player_id not in pot.eligible_players:
+                        pot.eligible_players.append(player_id)
                 self.pots.append(pot)
 
             prev_level = level

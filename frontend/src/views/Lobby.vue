@@ -67,6 +67,14 @@
           <el-input-number v-model="createForm.max_buyin" :min="100" :step="100" />
         </el-form-item>
       </el-form>
+      <el-alert
+        v-if="roomStore.error"
+        :title="roomStore.error"
+        type="error"
+        show-icon
+        :closable="false"
+        style="margin-top: 16px"
+      />
       <template #footer>
         <el-button @click="showCreateDialog = false">取消</el-button>
         <el-button type="primary" @click="handleCreateRoom">创建</el-button>
@@ -109,7 +117,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useRoomStore } from '@/stores/room'
@@ -125,6 +133,9 @@ const showJoinDialog = ref(false)
 const selectedRoom = ref<Room | null>(null)
 const createFormRef = ref<FormInstance>()
 const joinFormRef = ref<FormInstance>()
+
+// Auto refresh interval
+let refreshInterval: ReturnType<typeof setInterval> | null = null
 
 const createForm = reactive({
   name: '',
@@ -148,6 +159,17 @@ const createRules: FormRules = {
 
 onMounted(() => {
   roomStore.fetchRooms()
+  // Auto refresh every 2 seconds
+  refreshInterval = setInterval(() => {
+    roomStore.fetchRooms()
+  }, 2000)
+})
+
+onUnmounted(() => {
+  if (refreshInterval) {
+    clearInterval(refreshInterval)
+    refreshInterval = null
+  }
 })
 
 function getStatusType(status: string) {
@@ -172,6 +194,7 @@ async function handleCreateRoom() {
   const valid = await createFormRef.value?.validate()
   if (!valid) return
 
+  roomStore.error = null
   const room = await roomStore.createRoom(createForm)
   if (room) {
     showCreateDialog.value = false
@@ -182,10 +205,33 @@ async function handleCreateRoom() {
 
 function handleJoinRoom(room: Room) {
   selectedRoom.value = room
-  joinForm.buyin = room.max_buyin
-  joinForm.password = ''
-  roomStore.error = null
-  showJoinDialog.value = true
+  // Check if user is already in this room
+  const myUserId = authStore.user?.id
+  const mySeat = room.seats.find(s => s.user_id === myUserId)
+  if (mySeat) {
+    // User is already in the room, go directly
+    router.push(`/room/${room.id}`)
+    return
+  }
+  // Auto join with max buyin
+  joinRoomDirectly(room)
+}
+
+async function joinRoomDirectly(room: Room) {
+  const success = await roomStore.joinRoom(
+    room.id,
+    room.has_password ? undefined : undefined,
+    room.max_buyin
+  )
+  if (success) {
+    router.push(`/room/${room.id}`)
+  } else if (room.has_password) {
+    // Show password dialog if join failed and room has password
+    joinForm.buyin = room.max_buyin
+    joinForm.password = ''
+    roomStore.error = null
+    showJoinDialog.value = true
+  }
 }
 
 async function confirmJoinRoom() {
@@ -220,7 +266,8 @@ function handleLogout() {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0 24px;
+  padding: 16px 24px;
+  height: auto !important;
   background: rgba(0, 0, 0, 0.2);
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
@@ -228,6 +275,8 @@ function handleLogout() {
 .lobby-header h1 {
   color: #fff;
   font-size: 24px;
+  margin: 0;
+  line-height: 1;
 }
 
 .user-info {

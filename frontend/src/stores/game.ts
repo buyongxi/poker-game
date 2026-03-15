@@ -6,6 +6,7 @@ import { useRoomStore } from './room'
 export const useGameStore = defineStore('game', () => {
   const gameState = ref<GameState | null>(null)
   const chatMessages = ref<ChatMessage[]>([])
+  const infoMessages = ref<{message: string, timestamp: number}[]>([])
   const connected = ref(false)
   const ws = ref<WebSocket | null>(null)
   const reconnectAttempts = ref(0)
@@ -46,6 +47,8 @@ export const useGameStore = defineStore('game', () => {
     }
     connected.value = false
     gameState.value = null
+    chatMessages.value = []
+    infoMessages.value = []
   }
 
   function handleMessage(message: WSMessage) {
@@ -70,8 +73,26 @@ export const useGameStore = defineStore('game', () => {
       case 'user_joined':
         // Could show notification
         break
+      case 'user_disconnected':
+        // Player disconnected but can reconnect
+        break
       case 'user_left':
         // Could show notification
+        break
+      case 'owner_changed':
+        // Owner changed - show notification in chat
+        // Note: owner_id is already updated via room_state message
+        chatMessages.value.push({
+          user_id: 0,
+          username: '系统',
+          message: `👑 房主已转移给 ${message.data.new_owner_name}`,
+          is_system: true
+        })
+        break
+      case 'room_deleted':
+        // Room was deleted, clear state and redirect
+        gameState.value = null
+        connected.value = false
         break
       case 'hand_complete':
         // Show hand results in chat
@@ -86,6 +107,14 @@ export const useGameStore = defineStore('game', () => {
         break
       case 'game_ended':
         gameState.value = null
+        break
+      case 'info':
+        // Info message for current user - show as notification
+        console.log('[WS] Info:', message.data.message)
+        infoMessages.value.push({
+          message: message.data.message,
+          timestamp: Date.now()
+        })
         break
       case 'error':
         console.error('Server error:', message.data.message)
@@ -147,6 +176,7 @@ export const useGameStore = defineStore('game', () => {
   return {
     gameState,
     chatMessages,
+    infoMessages,
     connected,
     connect,
     disconnect,

@@ -1,108 +1,133 @@
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
-from app.models.room import Room, Seat, RoomStatus, SeatStatus
-from app.models.user import User
+import logging
+from typing import List, Optional, Tuple, Dict
+from datetime import datetime
+from app.models.room import RoomStatus, SeatStatus
 from app.schemas.room import RoomCreate
-from typing import List, Optional, Tuple
-from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+
+class MemorySeat:
+    """内存中的座位对象"""
+    def __init__(self, seat_index: int):
+        self.seat_index = seat_index
+        self.user_id: Optional[int] = None
+        self.user_name: Optional[str] = None
+        self.chips: int = 0
+        self.net_chips: int = 0
+        self.status: SeatStatus = SeatStatus.EMPTY
+        self.joined_at: Optional[datetime] = None
+
+
+class MemoryRoom:
+    """内存中的房间对象"""
+    def __init__(self, room_id: int, name: str, password: str, small_blind: int,
+                 big_blind: int, max_seats: int, max_buyin: int, owner_id: int):
+        self.id = room_id
+        self.name = name
+        self.password = password
+        self.small_blind = small_blind
+        self.big_blind = big_blind
+        self.max_seats = max_seats
+        self.max_buyin = max_buyin
+        self.owner_id = owner_id
+        self.status = RoomStatus.WAITING
+        self.seats: Dict[int, MemorySeat] = {}
+        # 初始化空座位
+        for i in range(max_seats):
+            self.seats[i] = MemorySeat(i)
 
 
 class RoomService:
-    def __init__(self, db: AsyncSession):
-        self.db = db
+    """纯内存的房间管理服务"""
 
-    async def create_room(self, room_data: RoomCreate, owner_id: int) -> Room:
-        """Create a new room."""
-        room = Room(
+    # 类变量：所有房间存储在这里
+    _rooms: Dict[int, MemoryRoom] = {}
+    _next_room_id: int = 1
+
+    def __init__(self):
+        pass  # 不再需要数据库会话
+
+    async def get_room_by_name(self, name: str) -> Optional[MemoryRoom]:
+        """Get a room by name from memory."""
+        for room in RoomService._rooms.values():
+            if room.name == name:
+                return room
+        return None
+
+    async def create_room(self, room_data: RoomCreate, owner_id: int, owner_name: str) -> MemoryRoom:
+        """Create a new room in memory."""
+        # Check if room with same name already exists
+        existing_room = await self.get_room_by_name(room_data.name)
+        if existing_room:
+            raise ValueError("该房间名称已存在")
+
+        room_id = RoomService._next_room_id
+        RoomService._next_room_id += 1
+
+        room = MemoryRoom(
+            room_id=room_id,
             name=room_data.name,
             password=room_data.password,
             small_blind=room_data.small_blind,
             big_blind=room_data.small_blind * 2,
             max_seats=room_data.max_seats,
             max_buyin=room_data.max_buyin,
-            owner_id=owner_id,
-            status=RoomStatus.IDLE
+            owner_id=owner_id
         )
-        self.db.add(room)
-        await self.db.commit()
-        await self.db.refresh(room)
 
-        # Create empty seats
-        for i in range(room.max_seats):
-            seat = Seat(room_id=room.id, seat_index=i, status=SeatStatus.EMPTY)
-            self.db.add(seat)
-        await self.db.commit()
+        # 房主自动加入第一个座位
+        room.seats[0].user_id = owner_id
+        room.seats[0].user_name = owner_name
+        room.seats[0].chips = room_data.max_buyin
+        room.seats[0].net_chips = 0
+        room.seats[0].status = SeatStatus.WAITING
+        room.seats[0].joined_at = datetime.utcnow()
 
-        # Auto-join owner to first seat with max buyin
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.seat_index == 0)
-            )
-        )
-        owner_seat = result.scalars().first()
-        if owner_seat:
-            from datetime import datetime
-            owner_seat.user_id = owner_id
-            owner_seat.chips = room_data.max_buyin  # Default to max buyin for owner
-            owner_seat.status = SeatStatus.WAITING
-            owner_seat.joined_at = datetime.utcnow()
-            room.status = RoomStatus.WAITING
-            await self.db.commit()
-            await self.db.refresh(room)
-
+        RoomService._rooms[room_id] = room
         return room
 
-    async def get_room_by_id(self, room_id: int) -> Optional[Room]:
-        result = await self.db.execute(
-            select(Room).where(Room.id == room_id)
-        )
-        return result.scalar_one_or_none()
+    async def get_room_by_id(self, room_id: int) -> Optional[MemoryRoom]:
+        """Get a room by ID from memory."""
+        return RoomService._rooms.get(room_id)
 
-    async def get_all_rooms(self) -> List[Room]:
-        result = await self.db.execute(select(Room))
-        return result.scalars().all()
+    async def get_all_rooms(self) -> List[MemoryRoom]:
+        """Get all rooms from memory."""
+        return list(RoomService._rooms.values())
 
-    async def get_active_rooms(self) -> List[Room]:
-        result = await self.db.execute(
-            select(Room).where(Room.status != RoomStatus.IDLE)
-        )
-        return result.scalars().all()
+    async def get_active_rooms(self) -> List[MemoryRoom]:
+        """Get all active rooms (not IDLE) from memory."""
+        return [room for room in RoomService._rooms.values() if room.status != RoomStatus.IDLE]
 
     async def delete_room(self, room_id: int) -> bool:
-        room = await self.get_room_by_id(room_id)
-        if room:
-            await self.db.delete(room)
-            await self.db.commit()
+        """Delete a room from memory."""
+        if room_id in RoomService._rooms:
+            del RoomService._rooms[room_id]
             return True
         return False
 
     async def join_room(
-        self, room: Room, user: User, buyin: int, password: Optional[str] = None
-    ) -> Tuple[Optional[Seat], str]:
-        """User joins a room."""
+        self, room: MemoryRoom, user_id: int, user_name: str, buyin: int, password: Optional[str] = None
+    ) -> Tuple[Optional[MemorySeat], str]:
+        """User joins a room in memory."""
         # Check password
         if room.password and room.password != password:
             return None, "房间密码错误"
 
-        # Check if already in room
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.user_id == user.id)
-            )
-        )
-        existing_seat = result.scalar_one_or_none()
-        if existing_seat:
-            return None, "你已在此房间中"
+        # Check if already in room (reconnect case)
+        for seat in room.seats.values():
+            if seat.user_id == user_id:
+                # Player is reconnecting, return their existing seat
+                return seat, ""
 
         # Find empty seat
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.status == SeatStatus.EMPTY)
-            ).order_by(Seat.seat_index)
-        )
-        seat = result.scalars().first()
+        empty_seat = None
+        for seat in room.seats.values():
+            if seat.status == SeatStatus.EMPTY:
+                empty_seat = seat
+                break
 
-        if not seat:
+        if not empty_seat:
             return None, "房间已满"
 
         # Check buyin
@@ -113,121 +138,114 @@ class RoomService:
             return None, f"买入金额不能少于 {room.big_blind}"
 
         # Update seat
-        seat.user_id = user.id
-        seat.chips = buyin
-        seat.status = SeatStatus.WAITING
-        from datetime import datetime
-        seat.joined_at = datetime.utcnow()
+        empty_seat.user_id = user_id
+        empty_seat.user_name = user_name
+        empty_seat.chips = buyin
+        empty_seat.net_chips = 0
+        empty_seat.status = SeatStatus.WAITING
+        empty_seat.joined_at = datetime.utcnow()
 
         # Update room status
         if room.status == RoomStatus.IDLE:
             room.status = RoomStatus.WAITING
 
-        await self.db.commit()
-        await self.db.refresh(seat)
+        return empty_seat, ""
 
-        return seat, ""
+    async def leave_room(self, room_id: int, user_id: int) -> Tuple[bool, str]:
+        """User leaves a room in memory."""
+        room = await self.get_room_by_id(room_id)
+        if not room:
+            return False, "房间不存在"
 
-    async def leave_room(self, room: Room, user_id: int) -> Tuple[bool, str]:
-        """User leaves a room."""
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.user_id == user_id)
-            )
-        )
-        seat = result.scalar_one_or_none()
+        # Find user's seat
+        user_seat = None
+        for seat in room.seats.values():
+            if seat.user_id == user_id:
+                user_seat = seat
+                break
 
-        if not seat:
+        if not user_seat:
             return False, "你不在该房间中"
 
-        if room.status == RoomStatus.PLAYING and seat.status == SeatStatus.PLAYING:
+        if room.status == RoomStatus.PLAYING and user_seat.status == SeatStatus.PLAYING:
             return False, "游戏中不能离开，请先弃牌"
 
-        # Clear seat
-        seat.user_id = None
-        seat.chips = 0
-        seat.net_chips = 0
-        seat.status = SeatStatus.EMPTY
-        seat.joined_at = None
+        # Check if leaving user is the owner
+        is_owner = room.owner_id == user_id
+        logger.debug(f"leave_room: user_id={user_id}, is_owner={is_owner}, current owner_id={room.owner_id}")
 
-        await self.db.commit()
+        # Clear seat
+        user_seat.user_id = None
+        user_seat.user_name = None
+        user_seat.chips = 0
+        user_seat.net_chips = 0
+        user_seat.status = SeatStatus.EMPTY
+        user_seat.joined_at = None
 
         # Check if room is empty (no players with user_id)
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.user_id.isnot(None))
-            )
-        )
-        remaining = result.scalars().all()
+        remaining = [seat for seat in room.seats.values() if seat.user_id is not None]
 
         if not remaining:
             # Delete the room when all players leave
-            await self.db.delete(room)
-            await self.db.commit()
+            del RoomService._rooms[room_id]
             return True, "room_deleted"
+
+        # If owner left, transfer ownership to another player
+        if is_owner and remaining:
+            # Pick the first remaining player as new owner
+            new_owner_id = remaining[0].user_id
+            logger.debug(f"Transferring ownership from {user_id} to {new_owner_id}")
+            room.owner_id = new_owner_id
+            return True, f"owner_transferred:{new_owner_id}"
 
         return True, ""
 
-    async def get_room_seats(self, room_id: int) -> List[Seat]:
-        result = await self.db.execute(
-            select(Seat).where(Seat.room_id == room_id).order_by(Seat.seat_index)
-        )
-        return result.scalars().all()
+    async def get_room_seats(self, room_id: int) -> List[MemorySeat]:
+        """Get all seats for a room from memory."""
+        room = await self.get_room_by_id(room_id)
+        if not room:
+            return []
+        return [room.seats[i] for i in sorted(room.seats.keys())]
 
     async def update_seat_status(
-        self, room: Room, user_id: int, status: SeatStatus
-    ) -> Optional[Seat]:
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.user_id == user_id)
-            )
-        )
-        seat = result.scalar_one_or_none()
+        self, room: MemoryRoom, user_id: int, status: SeatStatus
+    ) -> Optional[MemorySeat]:
+        """Update a seat's status in memory."""
+        for seat in room.seats.values():
+            if seat.user_id == user_id:
+                seat.status = status
+                return seat
+        return None
 
-        if seat:
-            seat.status = status
-            await self.db.commit()
-            await self.db.refresh(seat)
-
-        return seat
-
-    async def can_start_game(self, room: Room) -> Tuple[bool, str]:
+    async def can_start_game(self, room: MemoryRoom) -> Tuple[bool, str]:
         """Check if game can start."""
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.status == SeatStatus.READY)
-            )
-        )
-        ready_seats = result.scalars().all()
+        ready_count = sum(1 for seat in room.seats.values() if seat.status == SeatStatus.READY)
 
-        if len(ready_seats) < 2:
+        if ready_count < 2:
             return False, "需要至少2名玩家准备"
 
         return True, ""
 
-    async def get_ready_players(self, room_id: int) -> List[Seat]:
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room_id, Seat.status == SeatStatus.READY)
-            )
-        )
-        return result.scalars().all()
+    async def get_ready_players(self, room_id: int) -> List[MemorySeat]:
+        """Get all ready players from memory."""
+        room = await self.get_room_by_id(room_id)
+        if not room:
+            return []
+        return [seat for seat in room.seats.values() if seat.status == SeatStatus.READY]
 
-    async def update_room_status(self, room: Room, status: RoomStatus) -> Room:
+    async def update_room_status(self, room: MemoryRoom, status: RoomStatus) -> MemoryRoom:
+        """Update room status in memory."""
         room.status = status
-        await self.db.commit()
-        await self.db.refresh(room)
         return room
 
-    async def switch_seat(self, room: Room, user_id: int, target_seat_index: int) -> Tuple[Optional[Seat], str]:
-        """Switch user to a different empty seat."""
-        # Check if user is in the room
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.user_id == user_id)
-            )
-        )
-        current_seat = result.scalars().first()
+    async def switch_seat(self, room: MemoryRoom, user_id: int, target_seat_index: int) -> Tuple[Optional[MemorySeat], str]:
+        """Switch user to a different empty seat in memory."""
+        # Find user's current seat
+        current_seat = None
+        for seat in room.seats.values():
+            if seat.user_id == user_id:
+                current_seat = seat
+                break
 
         if not current_seat:
             return None, "你不在该房间中"
@@ -236,21 +254,17 @@ class RoomService:
             return None, "游戏中不能切换座位"
 
         # Check if target seat exists and is empty
-        result = await self.db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room.id, Seat.seat_index == target_seat_index)
-            )
-        )
-        target_seat = result.scalars().first()
-
-        if not target_seat:
+        if target_seat_index not in room.seats:
             return None, "目标座位不存在"
+
+        target_seat = room.seats[target_seat_index]
 
         if target_seat.user_id is not None:
             return None, "目标座位已被占用"
 
         # Swap seats
         target_seat.user_id = current_seat.user_id
+        target_seat.user_name = current_seat.user_name
         target_seat.chips = current_seat.chips
         target_seat.net_chips = current_seat.net_chips
         target_seat.status = current_seat.status
@@ -258,12 +272,53 @@ class RoomService:
 
         # Clear old seat
         current_seat.user_id = None
+        current_seat.user_name = None
         current_seat.chips = 0
         current_seat.net_chips = 0
         current_seat.status = SeatStatus.EMPTY
         current_seat.joined_at = None
 
-        await self.db.commit()
-        await self.db.refresh(target_seat)
-
         return target_seat, ""
+
+    async def get_user_seat(self, room: MemoryRoom, user_id: int) -> Optional[MemorySeat]:
+        """Get user's seat in a room from memory."""
+        for seat in room.seats.values():
+            if seat.user_id == user_id:
+                return seat
+        return None
+
+    async def rebuy_chips(self, room: MemoryRoom, user_id: int, amount: int) -> Tuple[Optional[MemorySeat], str]:
+        """Rebuy chips when out of chips in memory."""
+        seat = await self.get_user_seat(room, user_id)
+        if not seat:
+            return None, "你不在该房间中"
+
+        # Check if player has chips
+        if seat.chips > 0:
+            return None, "你还有筹码，无法补充"
+
+        # Check if game is active
+        if room.status == RoomStatus.PLAYING:
+            return None, "游戏中无法补充筹码"
+
+        # Check rebuy amount
+        if amount > room.max_buyin:
+            return None, f"买入金额不能超过 {room.max_buyin}"
+
+        if amount < room.big_blind:
+            return None, f"买入金额不能少于 {room.big_blind}"
+
+        # Update seat
+        seat.chips = amount
+        seat.net_chips -= amount  # Deduct from net_chips (rebuy is a loss from player's perspective)
+        seat.status = SeatStatus.WAITING
+
+        return seat, ""
+
+    async def update_seat_chips(self, room: MemoryRoom, user_id: int, chips: int, net_chips: int) -> Optional[MemorySeat]:
+        """Update seat chips and net_chips in memory."""
+        seat = await self.get_user_seat(room, user_id)
+        if seat:
+            seat.chips = chips
+            seat.net_chips = net_chips
+        return seat

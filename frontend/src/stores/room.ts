@@ -113,11 +113,17 @@ export const useRoomStore = defineStore('room', () => {
     }
   }
 
-  function updateRoomFromWS(data: { room_id: number; status: string; seats: Seat[] }) {
-    if (currentRoom.value && currentRoom.value.id === data.room_id) {
-      currentRoom.value.status = data.status as any
-      currentRoom.value.seats = data.seats
+  function updateRoomFromWS(data: { room_id: number; owner_id?: number; status: string; seats: Seat[] }) {
+    if (!currentRoom.value || currentRoom.value.id !== data.room_id) {
+      return
     }
+
+    // Update each property individually to ensure reactivity
+    currentRoom.value.status = data.status as any
+    currentRoom.value.owner_id = data.owner_id ?? currentRoom.value.owner_id
+
+    // Replace the seats array completely to trigger Vue reactivity
+    currentRoom.value.seats = data.seats.map(s => ({ ...s }))
   }
 
   async function switchSeat(roomId: number, seatIndex: number) {
@@ -126,6 +132,22 @@ export const useRoomStore = defineStore('room', () => {
       await fetchRoom(roomId)
     } catch (e: any) {
       error.value = e.response?.data?.detail || '切换座位失败'
+    }
+  }
+
+  async function rebuyChips(roomId: number, amount: number) {
+    try {
+      const seat = await roomApi.rebuy(roomId, amount)
+      if (currentRoom.value) {
+        const idx = currentRoom.value.seats.findIndex(s => s.seat_index === seat.seat_index)
+        if (idx !== -1) {
+          currentRoom.value.seats[idx] = seat
+        }
+      }
+      return true
+    } catch (e: any) {
+      error.value = e.response?.data?.detail || '补筹码失败'
+      return false
     }
   }
 
@@ -142,6 +164,7 @@ export const useRoomStore = defineStore('room', () => {
     setReady,
     setUnready,
     updateRoomFromWS,
-    switchSeat
+    switchSeat,
+    rebuyChips
   }
 })

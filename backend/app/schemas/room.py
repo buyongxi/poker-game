@@ -1,5 +1,4 @@
 from pydantic import BaseModel, Field
-from datetime import datetime
 from typing import Optional, List
 
 
@@ -17,7 +16,6 @@ class RoomUpdate(BaseModel):
 
 
 class SeatResponse(BaseModel):
-    id: int
     seat_index: int
     user_id: Optional[int]
     user_name: Optional[str]
@@ -39,7 +37,6 @@ class RoomResponse(BaseModel):
     max_buyin: int
     owner_id: int
     status: str
-    created_at: datetime
     seats: List[SeatResponse] = []
     player_count: int = 0
 
@@ -57,3 +54,6 @@ class SeatAction(BaseModel):
 
 class SwitchSeat(BaseModel):
     seat_index: int
+
+class RebuyChips(BaseModel):
+    amount: int = Field(..., ge=1)

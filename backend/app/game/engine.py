@@ -128,7 +128,7 @@ class GameEngine:
 
         self.pot_manager.reset()
 
-        # Reset players
+        # Reset players - set status to READY first (before dealing cards)
         for player in self.players.values():
             player.reset_for_hand()
 
@@ -138,7 +138,7 @@ class GameEngine:
         # Post blinds
         self._post_blinds()
 
-        # Deal hole cards
+        # Deal hole cards (this will set status to PLAYING)
         self._deal_hole_cards()
 
         # Set first to act (after big blind in preflop)
@@ -197,6 +197,10 @@ class GameEngine:
         self.pot_manager.add_bet(bb_player.user_id, bb_amount)
 
         self.current_bet = self.big_blind
+        # Min raise is always the big blind amount
+        # To raise, the total bet must be at least 2x the current bet (BB)
+        # So min_raise = big_blind, making min total bet = BB + BB = 2*BB
+        self.min_raise = self.big_blind
 
     def _deal_hole_cards(self) -> None:
         """Deal 2 cards to each active player."""
@@ -239,7 +243,18 @@ class GameEngine:
             actions.append({"action": ActionType.CALL, "amount": actual_call})
 
         # Raise
-        if player.chips > call_amount:
+        # Calculate call amount
+        call_amount = self.current_bet - player.current_bet
+
+        # Special case: BB in preflop can raise even when call_amount is 0
+        can_raise = player.chips > call_amount or (
+            player.is_bb and
+            self.phase == GamePhase.PREFLOP and
+            player.current_bet == self.current_bet and
+            player.chips > 0
+        )
+
+        if can_raise:
             min_raise_total = self.current_bet + self.min_raise
             max_raise = player.chips + player.current_bet
 
@@ -274,6 +289,15 @@ class GameEngine:
         # Execute action
         if action == ActionType.FOLD:
             player.fold()
+
+            # Check if only one player remains in hand
+            active_players = [p for p in self.players.values() if p.is_in_hand()]
+            print(f"[DEBUG] After fold, active_players count: {len(active_players)}")
+            if len(active_players) == 1:
+                # Only one player left, they win immediately
+                print(f"[DEBUG] Calling _end_hand_early, winner: {active_players[0].user_id}")
+                self._end_hand_early()
+                return True, ""
 
         elif action == ActionType.CHECK:
             if player.current_bet < self.current_bet:
@@ -456,33 +480,53 @@ class GameEngine:
         if len(active_players) == 1:
             winner = active_players[0]
 
-            # Calculate pots
-            active_ids = [p.user_id for p in self.players.values() if p.status not in [PlayerStatus.FOLDED]]
-            all_in_ids = [p.user_id for p in self.players.values() if p.status == PlayerStatus.ALL_IN]
-            self.pot_manager.calculate_pots(active_ids, all_in_ids)
-
+            # Get total pot from pot_manager (includes all bets, even from folded players)
             total_pot = self.pot_manager.get_total_pot()
 
             # Calculate chip changes
+            # For each player: chip_change = final_chips - initial_chips
+            # Since player.chips already has bets deducted, we need to track initial chips
+            # chip_change for non-winners = -their_total_bet (they lost their bets)
+            # chip_change for winner = total_pot - their_total_bet (they win the pot minus their own bet)
             chip_changes = {}
+
+            # First, record what each player lost (their bets)
             for player in self.players.values():
                 chip_changes[player.user_id] = -player.total_bet
+
+            # Winner gains the entire pot (which includes all players' bets)
+            # So winner's net change = total_pot - winner.total_bet
+            # But we already set chip_changes[winner] = -winner.total_bet
+            # Now add total_pot to it
             chip_changes[winner.user_id] += total_pot
+
+            # Verify: sum of all chip_changes should be 0 (conservation of chips)
+            total_change = sum(chip_changes.values())
+            if total_change != 0:
+                # This shouldn't happen, but log if it does
+                print(f"[WARNING] _end_hand_early: chip_changes sum = {total_change}, should be 0")
+                print(f"[DEBUG] chip_changes = {chip_changes}, total_pot = {total_pot}")
+
+            print(f"[DEBUG] _end_hand_early: winner={winner.user_id}, total_pot={total_pot}")
+            print(f"[DEBUG] _end_hand_early: chip_changes={chip_changes}")
+            print(f"[DEBUG] _end_hand_early: winner.total_bet={winner.total_bet}, winner.chips before={winner.chips}")
 
             winner.chips += total_pot
 
-            self.phase = GamePhase.ENDED
+            print(f"[DEBUG] _end_hand_early: winner.chips after={winner.chips}")
 
-            if self.on_hand_complete:
-                result = GameResult(
-                    winners=[{"user_id": winner.user_id, "amount": total_pot}],
-                    pot_amount=total_pot,
-                    community_cards=self.community_cards,
-                    player_hands={winner.user_id: winner.hole_cards},
-                    player_names={p.user_id: p.username for p in self.players.values()},
-                    chip_changes=chip_changes
-                )
-                self.on_hand_complete(result)
+            # Store result for later use (in handle_hand_end)
+            self._last_result = GameResult(
+                winners=[{"user_id": winner.user_id, "amount": total_pot}],
+                pot_amount=total_pot,
+                community_cards=self.community_cards,
+                player_hands={winner.user_id: winner.hole_cards},
+                player_names={p.user_id: p.username for p in self.players.values()},
+                chip_changes=chip_changes
+            )
+
+            self.phase = GamePhase.ENDED
+            # Don't call on_hand_complete here - it will be called in handle_hand_end
 
     def _showdown(self) -> None:
         """Resolve hand at showdown."""
@@ -491,21 +535,24 @@ class GameEngine:
         # Evaluate hands
         hand_rankings: Dict[int, EvaluatedHand] = {}
         active_players = [p for p in self.players.values() if p.is_in_hand()]
+        folded_players = [p for p in self.players.values() if p.status == PlayerStatus.FOLDED]
 
         for player in active_players:
             hand = HandEvaluator.best_hand(player.hole_cards, self.community_cards)
             hand_rankings[player.user_id] = hand
 
-        # Calculate pots
+        # Calculate pots - include folded players' bets
         active_ids = [p.user_id for p in active_players]
         all_in_ids = [p.user_id for p in active_players if p.status == PlayerStatus.ALL_IN]
-        self.pot_manager.calculate_pots(active_ids, all_in_ids)
+        folded_ids = [p.user_id for p in folded_players]
+        self.pot_manager.calculate_pots(active_ids, all_in_ids, folded_ids)
 
         # Calculate chip changes before distributing winnings
+        # For each player: chip_change = winnings - total_bet
         chip_changes = {}
+
+        # First, record what each player lost (their bets)
         for player in self.players.values():
-            # chip_change = winnings - total_bet
-            # We'll calculate this after distributing winnings
             chip_changes[player.user_id] = -player.total_bet
 
         # Distribute winnings
@@ -516,6 +563,13 @@ class GameEngine:
         for user_id, amount in winnings.items():
             self.players[user_id].chips += amount
             chip_changes[user_id] += amount
+
+        # Verify: sum of all chip_changes should be 0 (conservation of chips)
+        total_change = sum(chip_changes.values())
+        if total_change != 0:
+            print(f"[WARNING] _showdown: chip_changes sum = {total_change}, should be 0")
+            print(f"[DEBUG] chip_changes = {chip_changes}")
+            print(f"[DEBUG] winnings = {winnings}")
 
         # Prepare result
         winners = [
@@ -534,9 +588,7 @@ class GameEngine:
         )
 
         self.phase = GamePhase.ENDED
-
-        if self.on_hand_complete:
-            self.on_hand_complete(self._last_result)
+        # Don't call on_hand_complete here - it will be called in handle_hand_end
 
     def get_state(self, for_user_id: Optional[int] = None) -> dict:
         """Get current game state."""
@@ -555,7 +607,7 @@ class GameEngine:
             "pots": self.pot_manager.to_dict(),
             "current_pot": self.pot_manager.get_total_pot(),
             "current_bet": self.current_bet,
-            "min_raise": self.min_raise,
+            "min_raise": self.current_bet + self.min_raise,  # Total amount needed for min raise
             "current_player_id": self.player_order[self.current_player_index] if self.player_order and self.current_player_index < len(self.player_order) else None,
             "dealer_seat": self.players[self.player_order[self.dealer_index]].seat_index if self.player_order and self.dealer_index < len(self.player_order) else 0,
             "sb_seat": self.players[self.player_order[self.sb_index]].seat_index if self.player_order and self.sb_index < len(self.player_order) else 0,

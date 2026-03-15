@@ -64,9 +64,15 @@
         <div class="my-info" v-if="myPlayer">
           <span>筹码: {{ myPlayer.chips }}</span>
           <span>当前下注: {{ myPlayer.current_bet }}</span>
+          <span>净筹码: <span :class="mySeat?.net_chips >= 0 ? 'net-positive' : 'net-negative'">{{ mySeat?.net_chips >= 0 ? '+' : '' }}{{ mySeat?.net_chips }}</span></span>
         </div>
 
         <div class="action-buttons" v-if="isMyTurn">
+          <div class="timeout-warning" v-if="remainingTime !== null">
+            <span :class="{ 'time-critical': remainingTime <= 10 }">
+              剩余时间: {{ remainingTime }}秒
+            </span>
+          </div>
           <el-button @click="handleAction('fold')" type="danger">弃牌</el-button>
           <el-button
             v-if="canCheck"
@@ -82,18 +88,42 @@
           >
             跟注 {{ callAmount }}
           </el-button>
-          <el-button
+          <el-popover
             v-if="canRaise"
-            @click="showRaiseDialog = true"
-            type="success"
+            placement="top"
+            :width="280"
+            trigger="click"
+            v-model:visible="showRaiseDialog"
           >
-            加注
-          </el-button>
+            <template #reference>
+              <el-button type="success">加注</el-button>
+            </template>
+            <div class="raise-popover">
+              <div class="raise-amount">加注到: {{ raiseAmount }}</div>
+              <el-slider
+                v-model="raiseAmount"
+                :min="minRaise"
+                :max="maxRaise"
+                :step="roomStore.currentRoom?.big_blind || 20"
+              />
+              <div class="raise-actions">
+                <el-button size="small" @click="showRaiseDialog = false">取消</el-button>
+                <el-button size="small" type="primary" @click="confirmRaise">确认</el-button>
+              </div>
+            </div>
+          </el-popover>
           <el-button @click="handleAction('all_in')" type="warning">全押</el-button>
         </div>
 
         <div class="waiting-info" v-else-if="gameStore.gameState?.is_active">
           <span>等待其他玩家...</span>
+        </div>
+
+        <!-- In-game unready button -->
+        <div class="in-game-actions" v-if="gameStore.gameState?.is_active">
+          <el-button size="small" type="info" @click="handleInGameUnready">
+            {{ isOwner ? '本局结束后停止游戏' : '本局结束后退出' }}
+          </el-button>
         </div>
       </div>
 
@@ -109,6 +139,12 @@
             <span class="seat-value chips">{{ mySeat.chips }}</span>
           </div>
           <div class="seat-row">
+            <span class="seat-label">净筹码</span>
+            <span class="seat-value" :class="mySeat.net_chips >= 0 ? 'net-positive' : 'net-negative'">
+              {{ mySeat.net_chips >= 0 ? '+' : '' }}{{ mySeat.net_chips }}
+            </span>
+          </div>
+          <div class="seat-row">
             <span class="seat-label">状态</span>
             <el-tag size="small" :type="mySeat.status === 'ready' ? 'success' : 'info'">
               {{ mySeat.status === 'ready' ? '已准备' : '未准备' }}
@@ -116,9 +152,25 @@
           </div>
         </div>
 
+        <!-- Rebuy Panel (when chips are 0) -->
+        <div class="rebuy-panel" v-if="mySeat && mySeat.chips === 0">
+          <el-alert type="warning" :closable="false" show-icon>
+            你的筹码已用完，请补充筹码后继续游戏
+          </el-alert>
+          <div class="rebuy-form">
+            <el-input-number
+              v-model="rebuyAmount"
+              :min="roomStore.currentRoom?.big_blind || 20"
+              :max="roomStore.currentRoom?.max_buyin || 2000"
+              :step="100"
+            />
+            <el-button type="primary" @click="handleRebuy">补充筹码</el-button>
+          </div>
+        </div>
+
         <div class="pregame-actions">
           <el-button
-            v-if="mySeat && mySeat.status !== 'ready'"
+            v-if="mySeat && mySeat.chips > 0 && mySeat.status !== 'ready'"
             type="success"
             @click="gameStore.sendReady()"
           >
@@ -181,23 +233,6 @@
       </div>
     </div>
 
-    <!-- Raise Dialog -->
-    <el-dialog v-model="showRaiseDialog" title="加注" width="300px">
-      <div class="raise-slider">
-        <span>加注到: {{ raiseAmount }}</span>
-        <el-slider
-          v-model="raiseAmount"
-          :min="minRaise"
-          :max="maxRaise"
-          :step="roomStore.currentRoom?.big_blind || 20"
-        />
-      </div>
-      <template #footer>
-        <el-button @click="showRaiseDialog = false">取消</el-button>
-        <el-button type="primary" @click="confirmRaise">确认</el-button>
-      </template>
-    </el-dialog>
-
     <!-- Hand Complete Dialog -->
     <el-dialog
       v-model="showHandComplete"
@@ -223,7 +258,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElNotification } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
 import { useRoomStore } from '@/stores/room'
 import { useGameStore } from '@/stores/game'
@@ -243,6 +278,10 @@ const showRaiseDialog = ref(false)
 const showHandComplete = ref(false)
 const handWinners = ref<any[]>([])
 const raiseAmount = ref(0)
+const rebuyAmount = ref(0)
+const isLeavingIntentionally = ref(false)
+const remainingTime = ref<number | null>(null)
+let countdownInterval: ReturnType<typeof setInterval> | null = null
 
 const roomId = computed(() => parseInt(route.params.id as string))
 
@@ -267,9 +306,25 @@ const isMyTurn = computed(() => {
 })
 
 const canLeave = computed(() => {
-  // Cannot leave if in game
+  // Owner can always leave (will transfer ownership)
+  if (isOwner.value) {
+    // But not during active game hand
+    if (gameStore.gameState?.is_active) {
+      const myPlayer = gameStore.gameState.players?.find((p: any) => p.user_id === myUserId.value)
+      if (myPlayer && myPlayer.is_in_hand) {
+        return false
+      }
+    }
+    return true
+  }
+
+  // Non-owner: Can leave if not in an active game hand
   if (gameStore.gameState?.is_active) {
-    return false
+    // In active game - can only leave if not playing (folded out or not in game)
+    const myPlayer = gameStore.gameState.players?.find((p: any) => p.user_id === myUserId.value)
+    if (myPlayer && myPlayer.is_in_hand) {
+      return false
+    }
   }
   // Cannot leave if ready (must unready first)
   if (mySeat.value && mySeat.value.status === 'ready') {
@@ -278,9 +333,11 @@ const canLeave = computed(() => {
   return true
 })
 
-const isOwner = computed(() =>
-  roomStore.currentRoom?.owner_id === myUserId.value
-)
+const isOwner = computed(() => {
+  const result = roomStore.currentRoom?.owner_id === myUserId.value
+  console.log('[DEBUG] isOwner computed:', result, 'owner_id=', roomStore.currentRoom?.owner_id, 'myUserId=', myUserId.value)
+  return result
+})
 
 const canStart = computed(() => {
   const readyCount = roomStore.currentRoom?.seats.filter(s => s.status === 'ready').length || 0
@@ -320,7 +377,8 @@ const callAmount = computed(() => {
 
 const minRaise = computed(() => {
   if (!gameStore.gameState || !myPlayer.value) return 0
-  return currentBet.value + gameStore.gameState.min_raise
+  // min_raise from backend is already the total amount needed
+  return gameStore.gameState.min_raise
 })
 
 const maxRaise = computed(() => {
@@ -372,14 +430,23 @@ function sendChat() {
 }
 
 async function handleLeave() {
+  console.log('[DEBUG] handleLeave called, canLeave=', canLeave.value, 'isOwner=', isOwner.value)
   if (!canLeave.value) {
     if (gameStore.gameState?.is_active) {
-      ElMessage.warning('游戏中无法离开房间，请先停止游戏')
+      const myPlayer = gameStore.gameState.players?.find((p: any) => p.user_id === myUserId.value)
+      if (myPlayer && myPlayer.is_in_hand) {
+        ElMessage.warning('你正在游戏中，请先弃牌后再离开房间')
+      } else {
+        ElMessage.warning('游戏进行中，请等待本局结束后离开')
+      }
     } else if (mySeat.value?.status === 'ready') {
       ElMessage.warning('请先取消准备后再离开房间')
     }
     return
   }
+  // Mark as intentional leave
+  isLeavingIntentionally.value = true
+  console.log('[DEBUG] Calling leaveRoom API for room', roomId.value)
   await roomStore.leaveRoom(roomId.value)
   gameStore.disconnect()
   router.push('/lobby')
@@ -401,6 +468,31 @@ async function handleSit(seatIndex: number) {
   }
 }
 
+async function handleRebuy() {
+  if (rebuyAmount.value > 0) {
+    const success = await roomStore.rebuyChips(roomId.value, rebuyAmount.value)
+    if (success) {
+      ElMessage.success('补充筹码成功')
+    }
+  }
+}
+
+function handleInGameUnready() {
+  gameStore.sendUnready()
+  if (isOwner.value) {
+    ElMessage.info('已请求停止游戏，本局结束后将停止')
+  } else {
+    ElMessage.info('已取消准备，本局结束后将不会参与下一局')
+  }
+}
+
+// Watch for raise dialog to set initial value
+watch(showRaiseDialog, (show) => {
+  if (show) {
+    raiseAmount.value = minRaise.value
+  }
+})
+
 // Watch for hand complete
 watch(() => gameStore.gameState?.winners, (winners) => {
   if (winners && winners.length > 0 && gameStore.gameState?.phase === 'showdown') {
@@ -421,9 +513,52 @@ watch(() => gameStore.chatMessages.length, () => {
   })
 })
 
+// Watch for room deletion (redirect to lobby)
+watch(() => gameStore.connected, (connected) => {
+  // If disconnected and not intentional, check if we should redirect
+  if (!connected && !isLeavingIntentionally.value && gameStore.gameState === null) {
+    // Room might have been deleted, redirect to lobby
+    router.push('/lobby')
+  }
+})
+
+// Watch for game state changes to update countdown
+watch(() => gameStore.gameState, (newState) => {
+  if (newState && newState.remaining_time !== undefined && newState.remaining_time !== null) {
+    remainingTime.value = newState.remaining_time
+    // Start local countdown
+    if (countdownInterval) {
+      clearInterval(countdownInterval)
+    }
+    countdownInterval = setInterval(() => {
+      if (remainingTime.value !== null && remainingTime.value > 0) {
+        remainingTime.value--
+      }
+    }, 1000)
+  } else {
+    remainingTime.value = null
+    if (countdownInterval) {
+      clearInterval(countdownInterval)
+      countdownInterval = null
+    }
+  }
+}, { deep: true })
+
+// Watch for info messages
+watch(() => gameStore.infoMessages.length, () => {
+  const messages = gameStore.infoMessages
+  if (messages.length > 0) {
+    const lastMessage = messages[messages.length - 1]
+    ElMessage.warning(lastMessage.message)
+  }
+})
+
 // Initialize
 onMounted(async () => {
   await roomStore.fetchRoom(roomId.value)
+
+  // Set default rebuy amount to max buyin
+  rebuyAmount.value = roomStore.currentRoom?.max_buyin || 2000
 
   if (roomStore.currentRoom && authStore.token) {
     gameStore.connect(roomId.value, authStore.token)
@@ -431,7 +566,27 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  gameStore.disconnect()
+  // Clear countdown interval
+  if (countdownInterval) {
+    clearInterval(countdownInterval)
+    countdownInterval = null
+  }
+  // Only disconnect WebSocket, don't leave the room
+  // unless it was an intentional leave via the back button
+  if (!isLeavingIntentionally.value) {
+    // Browser navigation - just disconnect WS, keep seat
+    gameStore.disconnect()
+  }
+})
+
+// Handle browser back/forward navigation
+import { onBeforeRouteLeave } from 'vue-router'
+onBeforeRouteLeave((to, from, next) => {
+  // If not intentional leave (back button click), just disconnect WS
+  if (!isLeavingIntentionally.value) {
+    gameStore.disconnect()
+  }
+  next()
 })
 </script>
 
@@ -440,8 +595,9 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: 1fr 300px;
   grid-template-rows: auto 1fr;
-  min-height: 100vh;
+  height: 100vh;
   gap: 0;
+  overflow: hidden;
 }
 
 .room-header {
@@ -476,6 +632,7 @@ onUnmounted(() => {
   flex-direction: column;
   padding: 24px;
   overflow: auto;
+  min-height: 0;
 }
 
 .poker-table {
@@ -567,6 +724,32 @@ onUnmounted(() => {
   color: #ffd700;
 }
 
+.seat-value.net-positive {
+  color: #67c23a;
+}
+
+.seat-value.net-negative {
+  color: #f56c6c;
+}
+
+.rebuy-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  background: rgba(230, 162, 60, 0.1);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 400px;
+}
+
+.rebuy-form {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+}
+
 .action-buttons {
   display: flex;
   gap: 12px;
@@ -574,8 +757,39 @@ onUnmounted(() => {
   justify-content: center;
 }
 
+.timeout-warning {
+  width: 100%;
+  text-align: center;
+  margin-bottom: 8px;
+  font-size: 14px;
+  color: #e6a23c;
+}
+
+.timeout-warning .time-critical {
+  color: #f56c6c;
+  font-weight: bold;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .waiting-info {
   color: #aaa;
+}
+
+.in-game-actions {
+  margin-top: 8px;
+}
+
+.net-positive {
+  color: #67c23a;
+}
+
+.net-negative {
+  color: #f56c6c;
 }
 
 .pregame-actions {
@@ -599,6 +813,8 @@ onUnmounted(() => {
   flex-direction: column;
   background: rgba(0, 0, 0, 0.2);
   border-left: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  min-height: 0;
 }
 
 .chat-messages {
@@ -608,6 +824,24 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.chat-messages::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-messages::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.chat-messages::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
 }
 
 .chat-message {
@@ -645,15 +879,26 @@ onUnmounted(() => {
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.raise-slider {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
 .winners {
   display: flex;
   flex-direction: column;
+  gap: 12px;
+}
+
+.raise-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.raise-amount {
+  font-weight: bold;
+  text-align: center;
+}
+
+.raise-actions {
+  display: flex;
+  justify-content: center;
   gap: 12px;
 }
 

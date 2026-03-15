@@ -28,7 +28,3 @@ class User(Base):
     failed_login_attempts = Column(Integer, default=0)
     locked_until = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-
-    # Relationships
-    seats = relationship("Seat", back_populates="user")
-    owned_rooms = relationship("Room", back_populates="owner")

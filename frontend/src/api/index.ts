@@ -127,6 +127,11 @@ export const roomApi = {
   async switchSeat(roomId: number, seatIndex: number): Promise<import('@/types').Seat> {
     const response = await api.post(`/rooms/${roomId}/switch-seat`, { seat_index: seatIndex })
     return response.data
+  },
+
+  async rebuy(roomId: number, amount: number): Promise<import('@/types').Seat> {
+    const response = await api.post(`/rooms/${roomId}/rebuy`, { amount })
+    return response.data
   }
 }
 

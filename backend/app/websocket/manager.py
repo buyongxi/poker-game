@@ -1,16 +1,17 @@
+import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from typing import Dict, Set, Optional
-from sqlalchemy.ext.asyncio import AsyncSession
 import json
 import asyncio
 
-from app.database import async_session
 from app.services.room_service import RoomService
 from app.services.user_service import UserService
 from app.game.engine import GameEngine, GamePhase, ActionType
 from app.models.room import RoomStatus, SeatStatus
+from app.database import async_session
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class ConnectionManager:
@@ -31,6 +32,10 @@ class ConnectionManager:
         self.stop_requested: Dict[int, bool] = {}
         # room_id -> True (owner stopped game, end after current hand)
         self.game_stop_requested: Dict[int, bool] = {}
+        # room_id -> asyncio.Task for action timeout
+        self.timeout_tasks: Dict[int, asyncio.Task] = {}
+        # room_id -> time when current action started
+        self.action_start_times: Dict[int, float] = {}
 
     async def connect(self, websocket: WebSocket, room_id: int, user_id: int):
         await websocket.accept()
@@ -54,13 +59,49 @@ class ConnectionManager:
             import time
             self.disconnect_times[user_id] = time.time()
 
+    def cancel_timeout(self, room_id: int):
+        """Cancel any pending timeout task for a room."""
+        if room_id in self.timeout_tasks:
+            self.timeout_tasks[room_id].cancel()
+            del self.timeout_tasks[room_id]
+
+    def start_timeout(self, room_id: int, user_id: int, game: GameEngine):
+        """Start a timeout task for the current player."""
+        self.cancel_timeout(room_id)
+
+        # Record action start time
+        import time
+        self.action_start_times[room_id] = time.time()
+
+        async def timeout_task():
+            await asyncio.sleep(game.action_timeout)
+            # Timeout occurred - auto fold
+            await handle_timeout_fold(room_id, user_id)
+
+        self.timeout_tasks[room_id] = asyncio.create_task(timeout_task())
+
+    def get_remaining_time(self, room_id: int, game: GameEngine) -> Optional[int]:
+        """Get remaining time for current action in seconds."""
+        if room_id not in self.action_start_times:
+            return None
+        import time
+        elapsed = time.time() - self.action_start_times[room_id]
+        remaining = max(0, int(game.action_timeout - elapsed))
+        return remaining
+
     async def broadcast_to_room(self, room_id: int, message: dict):
+        logger.debug(f"broadcast_to_room: room_id={room_id}, message_type={message.get('type')}")
         if room_id in self.room_connections:
-            for connection in self.room_connections[room_id]:
+            connections = self.room_connections[room_id]
+            logger.debug(f"broadcast_to_room: {len(connections)} connections in room")
+            for connection in connections:
                 try:
                     await connection.send_json(message)
-                except:
-                    pass
+                    logger.debug(f"broadcast_to_room: sent to connection")
+                except Exception as e:
+                    logger.debug(f"broadcast_to_room: failed to send: {e}")
+        else:
+            logger.debug(f"broadcast_to_room: no connections for room {room_id}")
 
     async def send_to_user(self, user_id: int, message: dict):
         for ws, uid in self.connection_user.items():
@@ -80,11 +121,46 @@ class ConnectionManager:
         if room_id in self.room_games:
             del self.room_games[room_id]
 
+    def get_seat_by_user(self, room: 'MemoryRoom', user_id: int) -> Optional['MemorySeat']:
+        """Get a seat by user_id from memory room."""
+        for seat in room.seats.values():
+            if seat.user_id == user_id:
+                return seat
+        return None
+
+    def get_ready_players(self, room: 'MemoryRoom') -> list:
+        """Get list of ready players with chips > 0 from memory room."""
+        ready = []
+        for seat in room.seats.values():
+            if seat.status == SeatStatus.READY and seat.chips > 0 and seat.user_id:
+                ready.append(seat)
+        return ready
+
+    def get_room_seats_list(self, room: 'MemoryRoom') -> list:
+        """Get list of all seats for broadcasting from memory room."""
+        seats = []
+        for seat_index in sorted(room.seats.keys()):
+            seat = room.seats[seat_index]
+            seats.append({
+                "seat_index": seat.seat_index,
+                "user_id": seat.user_id,
+                "user_name": seat.user_name,
+                "chips": seat.chips,
+                "net_chips": seat.net_chips,
+                "status": seat.status.value if hasattr(seat.status, 'value') else seat.status
+            })
+        return seats
+
+    def remove_room(self, room_id: int):
+        """Remove room from memory."""
+        # This is now handled by RoomService, but we keep this for cleanup
+        pass
+
 
 manager = ConnectionManager()
 
 
-async def get_user_from_token(token: str, db: AsyncSession) -> Optional[int]:
+async def get_user_from_token(token: str) -> Optional[int]:
     """Validate JWT token and return user_id."""
     from jose import jwt, JWTError
     from app.config import settings
@@ -101,22 +177,22 @@ async def get_user_from_token(token: str, db: AsyncSession) -> Optional[int]:
 
 @router.websocket("/ws/room/{room_id}")
 async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
-    async with async_session() as db:
-        # Validate token
-        user_id = await get_user_from_token(token, db)
-        if not user_id:
-            await websocket.close(code=4001, reason="Invalid token")
-            return
+    # Validate token
+    user_id = await get_user_from_token(token)
+    if not user_id:
+        await websocket.close(code=4001, reason="Invalid token")
+        return
 
-        # Get user info
+    # Get user info from database (users are still persisted)
+    async with async_session() as db:
         user_service = UserService(db)
         user = await user_service.get_user_by_id(user_id)
         if not user:
             await websocket.close(code=4002, reason="User not found")
             return
 
-        # Get room info
-        room_service = RoomService(db)
+        # Get room info from memory
+        room_service = RoomService()
         room = await room_service.get_room_by_id(room_id)
         if not room:
             await websocket.close(code=4003, reason="Room not found")
@@ -135,7 +211,7 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
                 })
 
             # Broadcast user joined
-            await broadcast_room_state(room_id, db)
+            await broadcast_room_state(room_id)
             await manager.broadcast_to_room(room_id, {
                 "type": "user_joined",
                 "data": {
@@ -147,12 +223,15 @@ async def websocket_endpoint(websocket: WebSocket, room_id: int, token: str):
             # Handle messages
             while True:
                 data = await websocket.receive_json()
-                await handle_message(websocket, room_id, user_id, data, db)
+                await handle_message(websocket, room_id, user_id, data)
 
         except WebSocketDisconnect:
             manager.disconnect(websocket, room_id)
+            # Don't leave the room - just record disconnect time
+            # Player can reconnect within RECONNECT_TIMEOUT
+            # Notify other players that this player disconnected
             await manager.broadcast_to_room(room_id, {
-                "type": "user_left",
+                "type": "user_disconnected",
                 "data": {
                     "user_id": user_id,
                     "username": user.display_name
@@ -166,56 +245,81 @@ async def handle_message(
     websocket: WebSocket,
     room_id: int,
     user_id: int,
-    data: dict,
-    db: AsyncSession
+    data: dict
 ):
     """Handle WebSocket messages."""
     msg_type = data.get("type")
     msg_data = data.get("data", {})
 
-    print(f"[WS] Received message: type={msg_type}, user_id={user_id}, room_id={room_id}")
+    logger.debug(f"Received message: type={msg_type}, user_id={user_id}, room_id={room_id}")
 
-    room_service = RoomService(db)
-    user_service = UserService(db)
+    room_service = RoomService()
     room = await room_service.get_room_by_id(room_id)
 
     if not room:
         return
 
     if msg_type == "chat":
-        # Chat message
-        user = await user_service.get_user_by_id(user_id)
+        # Chat message - get user name from memory room
+        seat = manager.get_seat_by_user(room, user_id)
+        user_name = seat.user_name if seat else f"玩家{user_id}"
         await manager.broadcast_to_room(room_id, {
             "type": "chat",
             "data": {
                 "user_id": user_id,
-                "username": user.display_name,
+                "username": user_name,
                 "message": msg_data.get("message", "")[:500]
             }
         })
 
     elif msg_type == "ready":
-        # Player ready
-        seat = await room_service.update_seat_status(room, user_id, SeatStatus.READY)
-        if seat:
-            await broadcast_room_state(room_id, db)
-
-    elif msg_type == "unready":
-        # Player unready
-        game = manager.get_game(room_id)
-        if game and game.phase not in [GamePhase.ENDED]:
+        # Player ready - check if they have chips first (use memory)
+        mem_seat = manager.get_seat_by_user(room, user_id)
+        if not mem_seat:
             await websocket.send_json({
                 "type": "error",
-                "data": {"message": "游戏中无法取消准备"}
+                "data": {"message": "你不在该房间中"}
             })
             return
-        seat = await room_service.update_seat_status(room, user_id, SeatStatus.WAITING)
-        if seat:
-            await broadcast_room_state(room_id, db)
+
+        if mem_seat.chips <= 0:
+            await websocket.send_json({
+                "type": "error",
+                "data": {"message": "筹码不足，请先补充筹码"}
+            })
+            return
+
+        # Update memory
+        await room_service.update_seat_status(room, user_id, SeatStatus.READY)
+        await broadcast_room_state(room_id)
+
+    elif msg_type == "unready":
+        # Player unready - during game this marks them to not participate in next hand
+        game = manager.get_game(room_id)
+        if game and game.phase not in [GamePhase.ENDED]:
+            # During game, mark player to stop after current hand
+            manager.stop_requested[user_id] = True
+
+            # If owner unready, stop the game after current hand
+            if room.owner_id == user_id:
+                manager.game_stop_requested[room_id] = True
+                await manager.broadcast_to_room(room_id, {
+                    "type": "info",
+                    "data": {"message": "房主已取消准备，本局结束后将停止游戏"}
+                })
+            else:
+                await websocket.send_json({
+                    "type": "info",
+                    "data": {"message": "已取消准备，本局结束后将不会参与下一局"}
+                })
+        else:
+            # Not in game, just set status to waiting
+            await room_service.update_seat_status(room, user_id, SeatStatus.WAITING)
+            await broadcast_room_state(room_id)
 
     elif msg_type == "start_game":
         # Start game (owner only)
-        print(f"[WS] Start game request from user {user_id}, owner is {room.owner_id}")
+        logger.debug(f"Start game request from user {user_id}, owner is {room.owner_id}")
         if room.owner_id != user_id:
             await websocket.send_json({
                 "type": "error",
@@ -231,13 +335,12 @@ async def handle_message(
             })
             return
 
-        # Check if can start
-        can_start, msg = await room_service.can_start_game(room)
-        print(f"[WS] Can start: {can_start}, message: {msg}")
-        if not can_start:
+        # Check if can start (use memory)
+        ready_players = manager.get_ready_players(room)
+        if len(ready_players) < 2:
             await websocket.send_json({
                 "type": "error",
-                "data": {"message": msg}
+                "data": {"message": "需要至少2名玩家准备"}
             })
             return
 
@@ -247,34 +350,32 @@ async def handle_message(
             big_blind=room.big_blind
         )
 
-        # Add players
-        ready_seats = await room_service.get_ready_players(room_id)
-        for seat in ready_seats:
-            user = await user_service.get_user_by_id(seat.user_id)
-            game.add_player(seat.user_id, user.display_name, seat.seat_index, seat.chips)
+        # Add players from memory
+        for mem_seat in ready_players:
+            game.add_player(mem_seat.user_id, mem_seat.user_name, mem_seat.seat_index, mem_seat.chips)
 
         # Set callback for game complete
         async def on_hand_complete(result):
-            await handle_hand_complete(room_id, result, db)
+            await handle_hand_complete(room_id, result)
 
         game.on_hand_complete = on_hand_complete
 
         manager.set_game(room_id, game)
 
-        # Update room status
+        # Update room status in memory
         await room_service.update_room_status(room, RoomStatus.PLAYING)
 
         # Update seat status
-        for seat in ready_seats:
-            await room_service.update_seat_status(room, seat.user_id, SeatStatus.PLAYING)
+        for mem_seat in ready_players:
+            await room_service.update_seat_status(room, mem_seat.user_id, SeatStatus.PLAYING)
 
         # Start hand
         success = game.start_hand()
         if not success:
-            print(f"[WS] Failed to start hand")
+            logger.debug(f"Failed to start hand")
             # Rollback seat status
-            for seat in ready_seats:
-                await room_service.update_seat_status(room, seat.user_id, SeatStatus.READY)
+            for mem_seat in ready_players:
+                await room_service.update_seat_status(room, mem_seat.user_id, SeatStatus.READY)
             manager.remove_game(room_id)
             await room_service.update_room_status(room, RoomStatus.WAITING)
             await websocket.send_json({
@@ -299,9 +400,9 @@ async def handle_message(
         action_str = msg_data.get("action")
         amount = msg_data.get("amount", 0)
 
-        print(f"[WS] Action received: user_id={user_id}, action={action_str}, amount={amount}")
-        print(f"[WS] Current player: {game.get_current_player().user_id if game.get_current_player() else None}")
-        print(f"[WS] Player is_current: {game.players.get(user_id).is_current if game.players.get(user_id) else 'N/A'}")
+        logger.debug(f"Action received: user_id={user_id}, action={action_str}, amount={amount}")
+        logger.debug(f"Current player: {game.get_current_player().user_id if game.get_current_player() else None}")
+        logger.debug(f"Player is_current: {game.players.get(user_id).is_current if game.players.get(user_id) else 'N/A'}")
 
         try:
             action = ActionType(action_str)
@@ -313,7 +414,7 @@ async def handle_message(
             return
 
         success, msg = game.execute_action(user_id, action, amount)
-        print(f"[WS] Action result: success={success}, message={msg}")
+        logger.debug(f"Action result: success={success}, message={msg}")
 
         if not success:
             await websocket.send_json({
@@ -322,12 +423,15 @@ async def handle_message(
             })
             return
 
+        # Cancel timeout after successful action
+        manager.cancel_timeout(room_id)
+
         # Broadcast updated state
         await broadcast_game_state(room_id)
 
         # Check if hand ended
         if game.phase == GamePhase.ENDED:
-            await handle_hand_end(room_id, db)
+            await handle_hand_end(room_id)
 
     elif msg_type == "next_hand":
         # Start next hand
@@ -346,12 +450,16 @@ async def handle_message(
             await room_service.update_room_status(room, RoomStatus.WAITING)
             return
 
-        # Reset player statuses
+        # Update chips from game engine to memory seats
+        # Note: chips and net_chips should already be updated in handle_hand_end
+        # This is just to ensure player status is correct
         for player in game.players.values():
-            seat = await room_service.update_seat_status(room, player.user_id, SeatStatus.PLAYING)
+            seat = await room_service.get_user_seat(room, player.user_id)
             if seat:
-                seat.chips = player.chips
-                await db.commit()
+                # Verify chips are in sync
+                if seat.chips != player.chips:
+                    logger.warning(f"Chip mismatch for player {player.user_id}: seat.chips={seat.chips}, player.chips={player.chips}")
+                await room_service.update_seat_status(room, player.user_id, SeatStatus.PLAYING)
 
         game.start_hand()
         await broadcast_game_state(room_id)
@@ -374,43 +482,39 @@ async def handle_message(
             })
 
 
-async def broadcast_room_state(room_id: int, db: AsyncSession):
-    """Broadcast room state to all connections."""
-    room_service = RoomService(db)
+async def broadcast_room_state(room_id: int):
+    """Broadcast room state to all connections using in-memory data."""
+    room_service = RoomService()
     room = await room_service.get_room_by_id(room_id)
-    if room:
-        seats = await room_service.get_room_seats(room_id)
-        user_service = UserService(db)
 
-        seat_data = []
-        for seat in seats:
-            user_name = None
-            if seat.user_id:
-                user = await user_service.get_user_by_id(seat.user_id)
-                user_name = user.display_name if user else None
-            seat_data.append({
-                "seat_index": seat.seat_index,
-                "user_id": seat.user_id,
-                "user_name": user_name,
-                "chips": seat.chips,
-                "net_chips": seat.net_chips,
-                "status": seat.status.value if hasattr(seat.status, 'value') else seat.status
-            })
+    if not room:
+        return
 
-        await manager.broadcast_to_room(room_id, {
-            "type": "room_state",
-            "data": {
-                "room_id": room_id,
-                "status": room.status.value if hasattr(room.status, 'value') else room.status,
-                "seats": seat_data
-            }
-        })
+    seats = manager.get_room_seats_list(room)
+
+    await manager.broadcast_to_room(room_id, {
+        "type": "room_state",
+        "data": {
+            "room_id": room_id,
+            "owner_id": room.owner_id,
+            "status": room.status.value if hasattr(room.status, 'value') else room.status,
+            "seats": seats
+        }
+    })
 
 
 async def broadcast_game_state(room_id: int):
     """Broadcast game state to all connections."""
     game = manager.get_game(room_id)
     if game:
+        # Start timeout for current player if game is active (before getting remaining time)
+        current_player = game.get_current_player()
+        if current_player and game.phase not in [GamePhase.ENDED, GamePhase.SHOWDOWN]:
+            manager.start_timeout(room_id, current_player.user_id, game)
+
+        # Get remaining time for current action (after starting timeout)
+        remaining_time = manager.get_remaining_time(room_id, game)
+
         # Send personalized state to each user
         for ws in manager.room_connections.get(room_id, []):
             user_id = manager.connection_user.get(ws)
@@ -418,6 +522,8 @@ async def broadcast_game_state(room_id: int):
                 try:
                     state = game.get_state(user_id)
                     state["room_id"] = room_id
+                    state["action_timeout"] = game.action_timeout
+                    state["remaining_time"] = remaining_time
                     await ws.send_json({
                         "type": "game_state",
                         "data": state
@@ -426,7 +532,60 @@ async def broadcast_game_state(room_id: int):
                     pass
 
 
-async def handle_hand_complete(room_id: int, result, db: AsyncSession):
+async def handle_timeout_fold(room_id: int, user_id: int):
+    """Handle player timeout - auto fold and set to unready."""
+    game = manager.get_game(room_id)
+    if not game:
+        return
+
+    current_player = game.get_current_player()
+    if not current_player or current_player.user_id != user_id:
+        return
+
+    logger.debug(f"Player {user_id} timed out, auto-folding")
+
+    # Get player name before folding
+    player_name = current_player.username
+
+    # Execute fold action
+    success, msg = game.execute_action(user_id, ActionType.FOLD)
+    if not success:
+        return
+
+    # Set player to unready for next hand
+    room_service = RoomService()
+    room = await room_service.get_room_by_id(room_id)
+    if room:
+        await room_service.update_seat_status(room, user_id, SeatStatus.WAITING)
+        # Mark this player as wanting to stop
+        manager.stop_requested[user_id] = True
+
+    # Broadcast timeout message to chat
+    await manager.broadcast_to_room(room_id, {
+        "type": "chat",
+        "data": {
+            "user_id": 0,
+            "username": "系统",
+            "message": f"⏰ {player_name} 操作超时，自动弃牌",
+            "is_system": True
+        }
+    })
+
+    # Notify the player
+    await manager.send_to_user(user_id, {
+        "type": "info",
+        "data": {"message": "操作超时，已自动弃牌，本局结束后将不会参与下一局"}
+    })
+
+    # Broadcast updated state
+    await broadcast_game_state(room_id)
+
+    # Check if hand ended
+    if game.phase == GamePhase.ENDED:
+        await handle_hand_end(room_id)
+
+
+async def handle_hand_complete(room_id: int, result):
     """Handle hand completion callback."""
     # Build detailed result message
     result_lines = []
@@ -434,6 +593,15 @@ async def handle_hand_complete(room_id: int, result, db: AsyncSession):
     # Get player names from result
     player_names = result.player_names or {}
     chip_changes = result.chip_changes or {}
+
+    # Get net chips for all players from memory
+    room_service = RoomService()
+    room = await room_service.get_room_by_id(room_id)
+    net_chips_info = {}
+    if room:
+        for seat in room.seats.values():
+            if seat.user_id:
+                net_chips_info[seat.user_id] = seat.net_chips
 
     # Add winner information
     for winner in result.winners:
@@ -451,7 +619,7 @@ async def handle_hand_complete(room_id: int, result, db: AsyncSession):
 
     # Add chip changes for all players who participated
     if chip_changes:
-        result_lines.append("--- 筹码变动 ---")
+        result_lines.append("--- 本局筹码变动 ---")
         for uid, change in chip_changes.items():
             if change != 0:  # Only show players with chip changes
                 player_name = player_names.get(uid, f"玩家{uid}")
@@ -459,6 +627,18 @@ async def handle_hand_complete(room_id: int, result, db: AsyncSession):
                     result_lines.append(f"{player_name}: +{change}")
                 else:
                     result_lines.append(f"{player_name}: {change}")
+
+    # Add net chips for all players in room
+    if net_chips_info:
+        result_lines.append("--- 累计净筹码 ---")
+        for uid, net in net_chips_info.items():
+            player_name = player_names.get(uid, f"玩家{uid}")
+            if net > 0:
+                result_lines.append(f"{player_name}: +{net}")
+            elif net < 0:
+                result_lines.append(f"{player_name}: {net}")
+            else:
+                result_lines.append(f"{player_name}: 0")
 
     await manager.broadcast_to_room(room_id, {
         "type": "hand_complete",
@@ -478,6 +658,7 @@ async def handle_hand_complete(room_id: int, result, db: AsyncSession):
             },
             "player_names": player_names,
             "chip_changes": chip_changes,
+            "net_chips": net_chips_info,
             "result_message": "\n".join(result_lines)
         }
     })
@@ -489,34 +670,70 @@ def get_suit_symbol(suit: str) -> str:
     return symbols.get(suit, suit)
 
 
-async def handle_hand_end(room_id: int, db: AsyncSession):
+async def handle_hand_end(room_id: int):
     """Handle end of a hand."""
     game = manager.get_game(room_id)
-    room_service = RoomService(db)
-    room = await room_service.get_room_by_id(room_id)
 
-    if not game or not room:
+    if not game:
         return
 
-    # Update seat chips
+    logger.debug(f"handle_hand_end called for room {room_id}")
+    logger.debug(f"game.phase = {game.phase}")
+
+    # Cancel any pending timeout
+    manager.cancel_timeout(room_id)
+
+    # Track players who participated in this hand (for auto-ready)
+    previous_hand_players = set(game.players.keys())
+
+    # Track players who lost all chips
+    players_out_of_chips = []
+
+    # Update seat chips and net_chips in memory
+    room_service = RoomService()
+    room = await room_service.get_room_by_id(room_id)
+
+    if not room:
+        return
+
     for player in game.players.values():
-        from sqlalchemy import select, and_
-        from app.models.room import Seat
+        # Get memory seat
+        mem_seat = manager.get_seat_by_user(room, player.user_id)
+        if mem_seat:
+            # Use chip_changes from game engine instead of recalculating
+            # This is more accurate as it's calculated during showdown
+            if hasattr(game, '_last_result') and game._last_result and game._last_result.chip_changes:
+                chip_change = game._last_result.chip_changes.get(player.user_id, 0)
+            else:
+                # Fallback: calculate from chips difference
+                chip_change = player.chips - mem_seat.chips
 
-        result = await db.execute(
-            select(Seat).where(
-                and_(Seat.room_id == room_id, Seat.user_id == player.user_id)
-            )
-        )
-        seat = result.scalar_one_or_none()
-        if seat:
-            seat.chips = player.chips
-            seat.net_chips = player.total_bet - player.chips  # Simplified net calculation
+            logger.debug(f"Player {player.user_id}: engine_chips={player.chips}, mem_chips={mem_seat.chips}, change={chip_change}")
 
-    await db.commit()
+            # Update memory
+            new_net_chips = mem_seat.net_chips + chip_change
+            await room_service.update_seat_chips(room, player.user_id, player.chips, new_net_chips)
 
-    # Broadcast updated state
-    await broadcast_game_state(room_id)
+            # Check if player is out of chips
+            if player.chips == 0:
+                players_out_of_chips.append(player.user_id)
+
+    # Set room status to WAITING between hands
+    await room_service.update_room_status(room, RoomStatus.WAITING)
+
+    # Call on_hand_complete callback to broadcast results
+    if game.on_hand_complete and hasattr(game, '_last_result') and game._last_result:
+        logger.debug(f"Calling on_hand_complete with _last_result")
+        await game.on_hand_complete(game._last_result)
+
+    # Handle players who lost all chips - set them to waiting (need rebuy)
+    for user_id in players_out_of_chips:
+        await room_service.update_seat_status(room, user_id, SeatStatus.WAITING)
+        # Notify the player
+        await manager.send_to_user(user_id, {
+            "type": "info",
+            "data": {"message": "你的筹码已用完，请补充筹码后继续游戏"}
+        })
 
     # Handle players who requested to stop
     players_to_unready = []
@@ -538,37 +755,158 @@ async def handle_hand_end(room_id: int, db: AsyncSession):
         # Set all players to waiting
         for player in game.players.values():
             await room_service.update_seat_status(room, player.user_id, SeatStatus.WAITING)
-        await broadcast_room_state(room_id, db)
+        await broadcast_room_state(room_id)
     else:
         # Set players who requested to stop to waiting status
         for user_id in players_to_unready:
             await room_service.update_seat_status(room, user_id, SeatStatus.WAITING)
 
-        # Check if we can start another hand
-        can_start, msg = game.can_start()
-        if can_start:
+        # Auto-ready logic: set players who participated and have chips to READY
+        auto_ready_players = []
+        need_rebuy_players = []
+
+        for user_id in previous_hand_players:
+            if user_id in players_to_unready:
+                continue  # Skip players who requested to stop
+
+            mem_seat = manager.get_seat_by_user(room, user_id)
+            if mem_seat:
+                if mem_seat.chips > 0:
+                    # Auto-ready this player
+                    await room_service.update_seat_status(room, user_id, SeatStatus.READY)
+                    auto_ready_players.append(user_id)
+                else:
+                    # Player needs rebuy
+                    need_rebuy_players.append(user_id)
+
+        # Broadcast auto-ready notification
+        if auto_ready_players:
+            # Get names from memory room
+            auto_ready_names = []
+            for uid in auto_ready_players:
+                seat = manager.get_seat_by_user(room, uid)
+                if seat and seat.user_name:
+                    auto_ready_names.append(seat.user_name)
+
+            if auto_ready_names:
+                await manager.broadcast_to_room(room_id, {
+                    "type": "chat",
+                    "data": {
+                        "user_id": 0,
+                        "username": "系统",
+                        "message": f"🔄 {', '.join(auto_ready_names)} 已自动准备",
+                        "is_system": True
+                    }
+                })
+
+        # Broadcast room state to update chips, net_chips, and status in frontend
+        await broadcast_room_state(room_id)
+
+        # Check if we can start another hand (need at least 2 players with chips who are ready)
+        # Use in-memory data
+        ready_players = manager.get_ready_players(room)
+        ready_count = len(ready_players)
+        logger.debug(f"[AUTO-START] Checking auto-start: ready_count={ready_count}")
+        for rp in ready_players:
+            logger.debug(f"[AUTO-START] Ready player: user_id={rp.user_id}, chips={rp.chips}, status={rp.status}")
+
+        if ready_count >= 2:
             # Small delay before starting next hand
             await asyncio.sleep(3)
+
+            # Remove players without chips from game
+            players_to_remove = []
+            for player in game.players.values():
+                mem_seat = manager.get_seat_by_user(room, player.user_id)
+                logger.debug(f"[AUTO-START] Checking player {player.user_id}: mem_seat exists={mem_seat is not None}, chips={mem_seat.chips if mem_seat else 'N/A'}")
+                if not mem_seat or mem_seat.chips == 0:
+                    players_to_remove.append(player.user_id)
+
+            logger.debug(f"[AUTO-START] Players to remove (no chips): {players_to_remove}")
+            for user_id in players_to_remove:
+                game.remove_player(user_id)
+
+            logger.debug(f"[AUTO-START] game.players after removal: {list(game.players.keys())}")
+
+            # Sync chips from memory seats to game players for existing players
+            # This ensures chips are correct after handle_hand_end updates
+            for player in game.players.values():
+                mem_seat = manager.get_seat_by_user(room, player.user_id)
+                if mem_seat:
+                    if player.chips != mem_seat.chips:
+                        logger.debug(f"[AUTO-START] Syncing chips for player {player.user_id}: {player.chips} -> {mem_seat.chips}")
+                        player.chips = mem_seat.chips
+
+            # Add new ready players to game (players who weren't in previous hand but are now ready)
+            new_players = []
+            logger.debug(f"[AUTO-START] Checking ready_players for new additions:")
+            for mem_seat in ready_players:
+                user_id = mem_seat.user_id
+                logger.debug(f"[AUTO-START] Checking user_id={user_id}, in game.players={user_id in game.players}")
+                if user_id not in game.players:
+                    game.add_player(user_id, mem_seat.user_name, mem_seat.seat_index, mem_seat.chips)
+                    new_players.append(mem_seat.user_name)
+                    logger.debug(f"[AUTO-START] Added new player: {mem_seat.user_name}")
+
+            logger.debug(f"[AUTO-START] game.players after additions: {list(game.players.keys())}")
+
+            # Notify about new players joining
+            if new_players:
+                await manager.broadcast_to_room(room_id, {
+                    "type": "chat",
+                    "data": {
+                        "user_id": 0,
+                        "username": "系统",
+                        "message": f"🆕 {', '.join(new_players)} 加入本局",
+                        "is_system": True
+                    }
+                })
 
             # Update room status
             await room_service.update_room_status(room, RoomStatus.PLAYING)
 
-            # Reset player statuses for new hand
-            for player in game.players.values():
-                if player.user_id not in players_to_unready:
-                    await room_service.update_seat_status(room, player.user_id, SeatStatus.PLAYING)
+            # Broadcast room state to update chips and net_chips in frontend
+            await broadcast_room_state(room_id)
 
-            await db.commit()
-            game.start_hand()
+            # Reset all players in game to READY status before starting hand
+            # This is necessary because reset_for_hand() only handles PLAYING/FOLDED/ALL_IN states
+            from app.game.player import PlayerStatus
+            logger.debug(f"[AUTO-START] Resetting player statuses before start_hand:")
+            for player in game.players.values():
+                logger.debug(f"[AUTO-START] Player {player.user_id}: status={player.status} -> READY")
+                player.status = PlayerStatus.READY
+
+            # Start the hand
+            logger.debug(f"[AUTO-START] Calling start_hand()...")
+            success = game.start_hand()
+            logger.debug(f"[AUTO-START] start_hand() returned: {success}")
+            if not success:
+                logger.debug(f"Failed to start next hand after auto-ready")
+                # Not enough players, end game
+                await manager.broadcast_to_room(room_id, {
+                    "type": "game_ended",
+                    "data": {"message": "玩家不足，游戏结束"}
+                })
+                manager.remove_game(room_id)
+                await room_service.update_room_status(room, RoomStatus.WAITING)
+                for player in game.players.values():
+                    await room_service.update_seat_status(room, player.user_id, SeatStatus.WAITING)
+                await broadcast_room_state(room_id)
+                return
+
+            # Update seat status for players in game AFTER start_hand succeeds
+            for player in game.players.values():
+                await room_service.update_seat_status(room, player.user_id, SeatStatus.PLAYING)
+
             await broadcast_game_state(room_id)
         else:
             # Not enough players, end game
             await manager.broadcast_to_room(room_id, {
                 "type": "game_ended",
-                "data": {"message": msg}
+                "data": {"message": "玩家不足，游戏结束"}
             })
             manager.remove_game(room_id)
             await room_service.update_room_status(room, RoomStatus.WAITING)
             for player in game.players.values():
                 await room_service.update_seat_status(room, player.user_id, SeatStatus.WAITING)
-            await broadcast_room_state(room_id, db)
+            await broadcast_room_state(room_id)
