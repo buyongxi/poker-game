@@ -44,7 +44,8 @@ export interface Seat {
   user_id: number | null
   user_name: string | null
   chips: number
-  net_chips: number
+  total_buyin: number  // 累计买入金额
+  net_chips: number    // 净筹码 = chips - total_buyin
   status: 'empty' | 'waiting' | 'ready' | 'playing' | 'folded' | 'all_in' | 'disconnected'
 }
 

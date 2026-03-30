@@ -20,7 +20,8 @@ class SeatResponse(BaseModel):
     user_id: Optional[int]
     user_name: Optional[str]
     chips: int
-    net_chips: int
+    total_buyin: int = 0  # 累计买入金额
+    net_chips: int = 0    # 净筹码 = chips - total_buyin
     status: str
 
     class Config:

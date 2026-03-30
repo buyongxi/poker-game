@@ -14,7 +14,7 @@ class MemorySeat:
         self.user_id: Optional[int] = None
         self.user_name: Optional[str] = None
         self.chips: int = 0
-        self.net_chips: int = 0
+        self.total_buyin: int = 0  # 累计买入金额
         self.status: SeatStatus = SeatStatus.EMPTY
         self.joined_at: Optional[datetime] = None
 
@@ -80,7 +80,7 @@ class RoomService:
         room.seats[0].user_id = owner_id
         room.seats[0].user_name = owner_name
         room.seats[0].chips = room_data.max_buyin
-        room.seats[0].net_chips = 0
+        room.seats[0].total_buyin = room_data.max_buyin  # 记录买入金额
         room.seats[0].status = SeatStatus.WAITING
         room.seats[0].joined_at = datetime.utcnow()
 
@@ -141,7 +141,7 @@ class RoomService:
         empty_seat.user_id = user_id
         empty_seat.user_name = user_name
         empty_seat.chips = buyin
-        empty_seat.net_chips = 0
+        empty_seat.total_buyin = buyin  # 记录买入金额
         empty_seat.status = SeatStatus.WAITING
         empty_seat.joined_at = datetime.utcnow()
 
@@ -178,7 +178,7 @@ class RoomService:
         user_seat.user_id = None
         user_seat.user_name = None
         user_seat.chips = 0
-        user_seat.net_chips = 0
+        user_seat.total_buyin = 0
         user_seat.status = SeatStatus.EMPTY
         user_seat.joined_at = None
 
@@ -266,7 +266,7 @@ class RoomService:
         target_seat.user_id = current_seat.user_id
         target_seat.user_name = current_seat.user_name
         target_seat.chips = current_seat.chips
-        target_seat.net_chips = current_seat.net_chips
+        target_seat.total_buyin = current_seat.total_buyin
         target_seat.status = current_seat.status
         target_seat.joined_at = current_seat.joined_at
 
@@ -274,7 +274,7 @@ class RoomService:
         current_seat.user_id = None
         current_seat.user_name = None
         current_seat.chips = 0
-        current_seat.net_chips = 0
+        current_seat.total_buyin = 0
         current_seat.status = SeatStatus.EMPTY
         current_seat.joined_at = None
 
@@ -310,15 +310,14 @@ class RoomService:
 
         # Update seat
         seat.chips = amount
-        seat.net_chips -= amount  # Deduct from net_chips (rebuy is a loss from player's perspective)
+        seat.total_buyin += amount  # 累加买入金额
         seat.status = SeatStatus.WAITING
 
         return seat, ""
 
-    async def update_seat_chips(self, room: MemoryRoom, user_id: int, chips: int, net_chips: int) -> Optional[MemorySeat]:
-        """Update seat chips and net_chips in memory."""
+    async def update_seat_chips(self, room: MemoryRoom, user_id: int, chips: int) -> Optional[MemorySeat]:
+        """Update seat chips in memory."""
         seat = await self.get_user_seat(room, user_id)
         if seat:
             seat.chips = chips
-            seat.net_chips = net_chips
         return seat

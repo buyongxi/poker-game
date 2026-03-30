@@ -49,6 +49,11 @@
             {{ card.rank }}{{ getSuitSymbol(card.suit) }}
           </div>
         </template>
+        <!-- 玩家在游戏中但手牌不显示（应显示牌背） -->
+        <template v-else-if="isPlayerInHand">
+          <div v-for="i in 2" :key="'back-' + i" class="mini-card mini-card-back" />
+        </template>
+        <!-- 玩家不在游戏中（等待/准备状态）显示占位符 -->
         <template v-else>
           <div v-for="i in 2" :key="'ph-' + i" class="mini-card mini-card-placeholder" aria-hidden="true" />
         </template>
@@ -97,6 +102,13 @@ const seatStyle = computed(() => {
     top: `${y}%`,
     transform: 'translate(-50%, -50%)'
   }
+})
+
+// 判断玩家是否在当前这局牌中（有手牌但可能不显示）
+const isPlayerInHand = computed(() => {
+  if (!props.player) return false
+  const status = props.player.status
+  return status === 'playing' || status === 'all_in'
 })
 
 function getSuitClass(suit: string) {
@@ -288,6 +300,11 @@ function getSuitSymbol(suit: string) {
 
 .mini-card.black {
   color: #212121;
+}
+
+.mini-card-back {
+  background: url('/cards/Background.png') center/cover no-repeat;
+  border: 1px solid #0a1f3a;
 }
 
 .folded-overlay {

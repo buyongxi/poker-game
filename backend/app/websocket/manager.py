@@ -187,7 +187,8 @@ class ConnectionManager:
                 "user_id": seat.user_id,
                 "user_name": seat.user_name,
                 "chips": seat.chips,
-                "net_chips": seat.net_chips,
+                "total_buyin": seat.total_buyin,
+                "net_chips": seat.chips - seat.total_buyin,  # 净筹码 = 筹码 - 买入
                 "status": seat.status.value if hasattr(seat.status, 'value') else seat.status
             })
         return seats
@@ -614,7 +615,7 @@ async def handle_hand_complete(room_id: int, result):
     if room:
         for seat in room.seats.values():
             if seat.user_id:
-                net_chips_info[seat.user_id] = seat.net_chips
+                net_chips_info[seat.user_id] = seat.chips - seat.total_buyin
 
     # Add winner information
     for winner in result.winners:
@@ -684,24 +685,16 @@ def get_suit_symbol(suit: str) -> str:
 
 
 async def _update_player_chips(game: GameEngine, room, room_service: RoomService) -> list:
-    """Update seat chips and net_chips from game engine. Returns list of players out of chips."""
+    """Update seat chips from game engine. Returns list of players out of chips."""
     players_out_of_chips = []
 
     for player in game.players.values():
         mem_seat = manager.get_seat_by_user(room, player.user_id)
         if mem_seat:
-            # Use chip_changes from game engine instead of recalculating
-            if hasattr(game, '_last_result') and game._last_result and game._last_result.chip_changes:
-                chip_change = game._last_result.chip_changes.get(player.user_id, 0)
-            else:
-                # Fallback: calculate from chips difference
-                chip_change = player.chips - mem_seat.chips
+            logger.debug(f"Player {player.user_id}: engine_chips={player.chips}, mem_chips={mem_seat.chips}")
 
-            logger.debug(f"Player {player.user_id}: engine_chips={player.chips}, mem_chips={mem_seat.chips}, change={chip_change}")
-
-            # Update memory
-            new_net_chips = mem_seat.net_chips + chip_change
-            await room_service.update_seat_chips(room, player.user_id, player.chips, new_net_chips)
+            # Update memory - only chips, net_chips is calculated as chips - total_buyin
+            await room_service.update_seat_chips(room, player.user_id, player.chips)
 
             # Check if player is out of chips
             if player.chips == 0:

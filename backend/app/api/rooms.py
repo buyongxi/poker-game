@@ -17,7 +17,8 @@ def seat_to_response(seat) -> dict:
         "user_id": seat.user_id,
         "user_name": seat.user_name,
         "chips": seat.chips,
-        "net_chips": seat.net_chips,
+        "total_buyin": seat.total_buyin,
+        "net_chips": seat.chips - seat.total_buyin,  # 净筹码 = 筹码 - 买入
         "status": seat.status.value if hasattr(seat.status, 'value') else seat.status
     }
 
