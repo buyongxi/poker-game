@@ -427,6 +427,7 @@ const raisePresets = computed(() => {
     { label: '2/3池', value: pot * 2 / 3 },
     { label: '满池', value: pot },
     { label: '2x池', value: pot * 2 },
+    { label: '3x池', value: pot * 3 },
   ]
 
   // Round to nearest big blind, clamp to [min, max], deduplicate
