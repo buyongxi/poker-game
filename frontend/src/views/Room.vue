@@ -58,7 +58,12 @@
       <!-- Action Panel -->
       <div class="action-panel" v-if="showActionPanel">
         <div class="my-cards" v-if="myPlayer">
-          <Card v-for="(card, i) in myPlayer.cards" :key="i" :card="card" />
+          <template v-if="myPlayer.cards.length > 0">
+            <Card v-for="(card, i) in myPlayer.cards" :key="i" :card="card" />
+          </template>
+          <div v-else class="my-cards-placeholder" aria-hidden="true">
+            <span class="card-slot" /><span class="card-slot" />
+          </div>
         </div>
 
         <div class="my-info" v-if="myPlayer">
@@ -67,9 +72,10 @@
           <span>净筹码: <span :class="mySeat?.net_chips >= 0 ? 'net-positive' : 'net-negative'">{{ mySeat?.net_chips >= 0 ? '+' : '' }}{{ mySeat?.net_chips }}</span></span>
         </div>
 
-        <div class="action-buttons" v-if="isMyTurn">
+        <div class="action-turn-zone">
+          <div class="action-buttons" v-if="isMyTurn">
           <div class="timeout-warning" v-if="remainingTime !== null">
-            <span :class="{ 'time-critical': remainingTime <= 10 }">
+            <span :class="{ 'time-critical': isTimeCritical }">
               剩余时间: {{ remainingTime }}秒
             </span>
           </div>
@@ -91,7 +97,7 @@
           <el-popover
             v-if="canRaise"
             placement="top"
-            :width="280"
+            :width="320"
             trigger="click"
             v-model:visible="showRaiseDialog"
           >
@@ -106,6 +112,11 @@
                 :max="maxRaise"
                 :step="roomStore.currentRoom?.big_blind || 20"
               />
+              <div class="raise-presets">
+                <el-button size="small" v-for="preset in raisePresets" :key="preset.label" @click="applyPreset(preset.value)">
+                  {{ preset.label }}
+                </el-button>
+              </div>
               <div class="raise-actions">
                 <el-button size="small" @click="showRaiseDialog = false">取消</el-button>
                 <el-button size="small" type="primary" @click="confirmRaise">确认</el-button>
@@ -115,8 +126,9 @@
           <el-button @click="handleAction('all_in')" type="warning">全押</el-button>
         </div>
 
-        <div class="waiting-info" v-else-if="gameStore.gameState?.is_active">
-          <span>等待其他玩家...</span>
+          <div class="waiting-info" v-else-if="gameStore.gameState?.is_active">
+            <span>等待其他玩家...</span>
+          </div>
         </div>
 
         <!-- In-game unready button -->
@@ -152,19 +164,21 @@
           </div>
         </div>
 
-        <!-- Rebuy Panel (when chips are 0) -->
-        <div class="rebuy-panel" v-if="mySeat && mySeat.chips === 0">
-          <el-alert type="warning" :closable="false" show-icon>
-            你的筹码已用完，请补充筹码后继续游戏
-          </el-alert>
-          <div class="rebuy-form">
-            <el-input-number
-              v-model="rebuyAmount"
-              :min="roomStore.currentRoom?.big_blind || 20"
-              :max="roomStore.currentRoom?.max_buyin || 2000"
-              :step="100"
-            />
-            <el-button type="primary" @click="handleRebuy">补充筹码</el-button>
+        <!-- 固定高度区域，避免补充筹码面板出现/消失时整页跳动 -->
+        <div class="pregame-rebuy-area" v-if="mySeat">
+          <div class="rebuy-panel" v-if="mySeat.chips === 0">
+            <el-alert type="warning" :closable="false" show-icon>
+              你的筹码已用完，请补充筹码后继续游戏
+            </el-alert>
+            <div class="rebuy-form">
+              <el-input-number
+                v-model="rebuyAmount"
+                :min="roomStore.currentRoom?.big_blind || 20"
+                :max="roomStore.currentRoom?.max_buyin || 2000"
+                :step="100"
+              />
+              <el-button type="primary" @click="handleRebuy">补充筹码</el-button>
+            </div>
           </div>
         </div>
 
@@ -238,7 +252,8 @@
       v-model="showHandComplete"
       title="本局结束"
       width="400px"
-      :close-on-click-modal="false"
+      :close-on-click-modal="true"
+      :close-on-press-escape="true"
     >
       <div class="winners">
         <div v-for="winner in handWinners" :key="winner.user_id" class="winner">
@@ -248,7 +263,7 @@
         </div>
       </div>
       <template #footer>
-        <el-button type="primary" @click="startNextHand">下一局</el-button>
+        <span class="hand-complete-hint">下一局即将自动开始...</span>
       </template>
     </el-dialog>
   </div>
@@ -295,14 +310,21 @@ const myPlayer = computed(() =>
   gameStore.gameState?.players.find(p => p.user_id === myUserId.value)
 )
 
-const isMyTurn = computed(() => {
-  const result = gameStore.gameState?.current_player_id === myUserId.value
-  console.log('[Game] isMyTurn check:', {
-    current_player_id: gameStore.gameState?.current_player_id,
-    myUserId: myUserId.value,
-    result
-  })
-  return result
+const isMyTurn = computed(
+  () => gameStore.gameState?.current_player_id === myUserId.value
+)
+
+const actionTimeoutSeconds = computed(
+  () => gameStore.gameState?.action_timeout ?? 30
+)
+
+/** 剩余时间低于该阈值时高亮（随服务器配置的思考时间上限成比例） */
+const isTimeCritical = computed(() => {
+  const rem = remainingTime.value
+  if (rem === null) return false
+  const t = actionTimeoutSeconds.value
+  const threshold = Math.max(3, Math.min(15, Math.ceil(t / 3)))
+  return rem <= threshold
 })
 
 const canLeave = computed(() => {
@@ -333,11 +355,9 @@ const canLeave = computed(() => {
   return true
 })
 
-const isOwner = computed(() => {
-  const result = roomStore.currentRoom?.owner_id === myUserId.value
-  console.log('[DEBUG] isOwner computed:', result, 'owner_id=', roomStore.currentRoom?.owner_id, 'myUserId=', myUserId.value)
-  return result
-})
+const isOwner = computed(
+  () => roomStore.currentRoom?.owner_id === myUserId.value
+)
 
 const canStart = computed(() => {
   const readyCount = roomStore.currentRoom?.seats.filter(s => s.status === 'ready').length || 0
@@ -366,9 +386,16 @@ const canCall = computed(() =>
   myPlayer.value && myPlayer.value.current_bet < currentBet.value && myPlayer.value.chips > 0
 )
 
-const canRaise = computed(() =>
-  myPlayer.value && myPlayer.value.chips > (currentBet.value - myPlayer.value.current_bet)
-)
+const canRaise = computed(() => {
+  if (!myPlayer.value || !gameStore.gameState) return false
+  const chipsNeededForCall = currentBet.value - myPlayer.value.current_bet
+  const chipsAfterCall = myPlayer.value.chips - chipsNeededForCall
+  const maxPossibleRaise = myPlayer.value.chips + myPlayer.value.current_bet
+  const minRaiseTotal = gameStore.gameState.min_raise || 0
+  // Can only raise if we have enough chips and the min raise is not too high
+  // (min raise might be very high after an all-in that didn't fully raise)
+  return chipsAfterCall > 0 && maxPossibleRaise >= minRaiseTotal
+})
 
 const callAmount = computed(() => {
   if (!myPlayer.value) return 0
@@ -385,6 +412,41 @@ const maxRaise = computed(() => {
   if (!myPlayer.value) return 0
   return myPlayer.value.chips + myPlayer.value.current_bet
 })
+
+const currentPot = computed(() => gameStore.gameState?.current_pot || 0)
+
+const raisePresets = computed(() => {
+  const pot = currentPot.value
+  const bb = roomStore.currentRoom?.big_blind || 20
+  const min = minRaise.value
+  const max = maxRaise.value
+
+  const presets = [
+    { label: '1/3池', value: pot / 3 },
+    { label: '1/2池', value: pot / 2 },
+    { label: '2/3池', value: pot * 2 / 3 },
+    { label: '满池', value: pot },
+    { label: '2x池', value: pot * 2 },
+  ]
+
+  // Round to nearest big blind, clamp to [min, max], deduplicate
+  const seen = new Set<number>()
+  return presets
+    .map(p => {
+      let v = Math.round(p.value / bb) * bb
+      v = Math.max(min, Math.min(max, v))
+      return { label: p.label, value: v }
+    })
+    .filter(p => {
+      if (seen.has(p.value)) return false
+      seen.add(p.value)
+      return true
+    })
+})
+
+function applyPreset(value: number) {
+  raiseAmount.value = value
+}
 
 const sortedSeats = computed(() =>
   [...(roomStore.currentRoom?.seats || [])].sort((a, b) => a.seat_index - b.seat_index)
@@ -452,11 +514,6 @@ async function handleLeave() {
   router.push('/lobby')
 }
 
-function startNextHand() {
-  showHandComplete.value = false
-  gameStore.sendNextHand()
-}
-
 async function handleSit(seatIndex: number) {
   if (mySeat.value) {
     // Already have a seat, switch to new seat
@@ -503,6 +560,13 @@ watch(() => gameStore.gameState?.winners, (winners) => {
     showHandComplete.value = true
   }
 }, { deep: true })
+
+// Auto-close hand complete dialog when next hand starts
+watch(() => gameStore.gameState?.phase, (phase) => {
+  if (phase === 'preflop' && showHandComplete.value) {
+    showHandComplete.value = false
+  }
+})
 
 // Watch chat messages to scroll
 watch(() => gameStore.chatMessages.length, () => {
@@ -679,18 +743,60 @@ onBeforeRouteLeave((to, from, next) => {
   flex-direction: column;
   align-items: center;
   gap: 16px;
+  flex-shrink: 0;
+}
+
+.action-panel {
+  min-height: 280px;
+}
+
+.pregame-panel {
+  min-height: 280px;
 }
 
 .my-cards {
   display: flex;
   gap: 8px;
+  min-height: 84px;
+  height: 84px;
+  align-items: center;
+  justify-content: center;
+}
+
+.my-cards-placeholder {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: center;
+}
+
+.card-slot {
+  width: 60px;
+  height: 84px;
+  border-radius: 6px;
+  border: 2px dashed rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.15);
+  box-sizing: border-box;
+}
+
+.action-turn-zone {
+  width: 100%;
+  min-height: 132px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
 }
 
 .my-info {
   display: flex;
+  flex-wrap: wrap;
   gap: 24px;
   color: #aaa;
   font-size: 14px;
+  justify-content: center;
+  min-height: 22px;
 }
 
 .my-seat-info {
@@ -755,6 +861,8 @@ onBeforeRouteLeave((to, from, next) => {
   gap: 12px;
   flex-wrap: wrap;
   justify-content: center;
+  min-height: 40px;
+  align-items: center;
 }
 
 .timeout-warning {
@@ -778,10 +886,18 @@ onBeforeRouteLeave((to, from, next) => {
 
 .waiting-info {
   color: #aaa;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .in-game-actions {
   margin-top: 8px;
+  min-height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .net-positive {
@@ -792,9 +908,23 @@ onBeforeRouteLeave((to, from, next) => {
   color: #f56c6c;
 }
 
+.pregame-rebuy-area {
+  width: 100%;
+  max-width: 420px;
+  min-height: 108px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
 .pregame-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 12px;
+  min-height: 48px;
+  align-items: center;
+  justify-content: center;
 }
 
 .game-actions {
@@ -885,6 +1015,11 @@ onBeforeRouteLeave((to, from, next) => {
   gap: 12px;
 }
 
+.hand-complete-hint {
+  color: #999;
+  font-size: 13px;
+}
+
 .raise-popover {
   display: flex;
   flex-direction: column;
@@ -900,6 +1035,19 @@ onBeforeRouteLeave((to, from, next) => {
   display: flex;
   justify-content: center;
   gap: 12px;
+}
+
+.raise-presets {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.raise-presets .el-button {
+  margin: 0;
+  padding: 4px 10px;
+  font-size: 12px;
 }
 
 .winner {

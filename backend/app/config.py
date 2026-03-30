@@ -19,16 +19,19 @@ class Settings(BaseSettings):
     SESSION_TIMEOUT: int = 30 * 60  # 30 minutes
     LOGIN_LOCKOUT_TIME: int = 15 * 60  # 15 minutes
     MAX_LOGIN_ATTEMPTS: int = 5
-    ACTION_TIMEOUT: int = 30  # 30 seconds
-    RECONNECT_TIMEOUT: int = 5 * 60  # 5 minutes
+    # 玩家单次思考/操作上限（秒），可通过环境变量 ACTION_TIMEOUT 或 run.py --action-timeout 配置
+    ACTION_TIMEOUT: int = 30
+    RECONNECT_TIMEOUT: int = 5 * 60  # 5 minutes - 断线重连超时
+    AUTO_START_DELAY: int = 3  # 自动开始下一手前的延迟（秒）
+    MAX_CHAT_LENGTH: int = 500  # 聊天消息最大长度
 
     # CORS
     CORS_ORIGINS: list = ["http://localhost:5173", "http://127.0.0.1:5173"]
 
     # Initial admin account
-    ADMIN_USERNAME: str = "admin"
-    ADMIN_PASSWORD: str = "admin123"
-    ADMIN_DISPLAY_NAME: str = "管理员"
+    ADMIN_USERNAME: Optional[str] = None
+    ADMIN_PASSWORD: Optional[str] = None
+    ADMIN_DISPLAY_NAME: Optional[str] = None
 
     class Config:
         env_file = ".env"

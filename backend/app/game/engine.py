@@ -1,3 +1,4 @@
+import logging
 from typing import List, Dict, Optional, Tuple, Set
 from enum import Enum
 from dataclasses import dataclass
@@ -7,6 +8,8 @@ from app.game.player import Player, PlayerStatus
 from app.game.hand_evaluator import HandEvaluator, EvaluatedHand
 from app.game.pot_manager import PotManager
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class GamePhase(str, Enum):
@@ -62,6 +65,7 @@ class GameEngine:
 
         # Position markers
         self.dealer_index: int = 0
+        self.dealer_user_id: Optional[int] = None  # Track dealer by user_id for stability
         self.sb_index: int = 0
         self.bb_index: int = 0
         self.current_player_index: int = 0
@@ -125,6 +129,8 @@ class GameEngine:
         self.min_raise = self.big_blind
         self.last_raiser_index = None
         self.acted_this_round = set()
+        self._last_result = None
+        self._show_cards_at_end = False
 
         self.pot_manager.reset()
 
@@ -156,8 +162,17 @@ class GameEngine:
         if len(active_players) < 2:
             return
 
-        # Move dealer button
+        # Restore dealer_index from dealer_user_id if the player is still present
+        if self.dealer_user_id is not None and self.dealer_user_id in self.player_order:
+            self.dealer_index = self.player_order.index(self.dealer_user_id)
+        else:
+            # Clamp dealer_index to valid range
+            if self.dealer_index >= len(self.player_order):
+                self.dealer_index = 0
+
+        # Move dealer button to next active player
         self.dealer_index = self._next_active_player(self.dealer_index)
+        self.dealer_user_id = self.player_order[self.dealer_index]
 
         # In heads-up, dealer is SB
         if len(active_players) == 2:
@@ -209,11 +224,26 @@ class GameEngine:
             if player.status == PlayerStatus.READY:
                 cards = self.deck.deal(2)
                 player.deal_cards(cards)
+            elif player.status == PlayerStatus.ALL_IN:
+                # Player went all-in posting blind - deal cards but keep ALL_IN status
+                cards = self.deck.deal(2)
+                player.hole_cards = cards
 
     def _set_first_to_act_preflop(self) -> None:
         """Set first player to act in preflop (after BB)."""
+        start_index = self.bb_index
+        for _ in range(len(self.player_order)):
+            start_index = self._next_active_player(start_index)
+            player = self.players[self.player_order[start_index]]
+            if player.status == PlayerStatus.PLAYING and player.chips > 0:
+                self.current_player_index = start_index
+                player.is_current = True
+                return
+
+        # No player can act (all ALL_IN) - check if round complete and advance
         self.current_player_index = self._next_active_player(self.bb_index)
-        self.players[self.player_order[self.current_player_index]].is_current = True
+        if self._is_betting_round_complete():
+            self._advance_phase()
 
     def get_current_player(self) -> Optional[Player]:
         """Get the player whose turn it is."""
@@ -258,7 +288,9 @@ class GameEngine:
             min_raise_total = self.current_bet + self.min_raise
             max_raise = player.chips + player.current_bet
 
-            if max_raise > self.current_bet:
+            # Only add raise option if min raise is valid (min <= max)
+            # This prevents raise option after an all-in that didn't fully raise
+            if max_raise > self.current_bet and min_raise_total <= max_raise:
                 actions.append({
                     "action": ActionType.RAISE,
                     "min_amount": min_raise_total,
@@ -292,10 +324,10 @@ class GameEngine:
 
             # Check if only one player remains in hand
             active_players = [p for p in self.players.values() if p.is_in_hand()]
-            print(f"[DEBUG] After fold, active_players count: {len(active_players)}")
+            logger.debug(f"After fold, active_players count: {len(active_players)}")
             if len(active_players) == 1:
                 # Only one player left, they win immediately
-                print(f"[DEBUG] Calling _end_hand_early, winner: {active_players[0].user_id}")
+                logger.debug(f"Calling _end_hand_early, winner: {active_players[0].user_id}")
                 self._end_hand_early()
                 return True, ""
 
@@ -331,10 +363,18 @@ class GameEngine:
             self.pot_manager.add_bet(user_id, all_in_amount)
 
             if player.current_bet > self.current_bet:
-                self.min_raise = player.current_bet - self.current_bet
-                self.current_bet = player.current_bet
-                self.last_raiser_index = self.current_player_index
-                self.acted_this_round = {user_id}  # Only all-in player has acted
+                increase = player.current_bet - self.current_bet
+                if increase >= self.min_raise:
+                    # Full raise - reopen betting for all other players
+                    self.min_raise = increase
+                    self.current_bet = player.current_bet
+                    self.last_raiser_index = self.current_player_index
+                    self.acted_this_round = {user_id}
+                else:
+                    # Not a full raise - update current bet but don't reopen betting
+                    # Set min_raise to a very large value to prevent further raises
+                    self.current_bet = player.current_bet
+                    self.min_raise = 10_000_000  # Large enough to prevent raises
 
         else:
             return False, "无效操作"
@@ -409,9 +449,9 @@ class GameEngine:
             self._end_hand_early()
             return
 
-        # Check if only all-in players remain
+        # Check if only all-in players remain (or at most 1 non-all-in)
         non_all_in = [p for p in active_players if p.status == PlayerStatus.PLAYING]
-        if not non_all_in:
+        if len(non_all_in) <= 1:
             # Run out all community cards
             self._run_out_community_cards()
             return
@@ -430,10 +470,14 @@ class GameEngine:
             self._showdown()
             return
 
-        # Set first to act (starting from small blind for flop/turn/river)
-        # In post-flop rounds, action starts from the small blind (first active player after dealer)
-        self.current_player_index = self.sb_index
-        # Find the first active player starting from SB
+        # Set first to act for post-flop rounds
+        # In heads-up, BB (non-dealer) acts first post-flop
+        # In multi-way, SB (first player after dealer) acts first
+        if len(self.player_order) == 2:
+            self.current_player_index = self.bb_index
+        else:
+            self.current_player_index = self.sb_index
+        # Find the first active player starting from that position
         player = self.players[self.player_order[self.current_player_index]]
         if not (player.is_in_hand() and player.status != PlayerStatus.ALL_IN):
             # SB might have folded or be all-in, find next active player
@@ -504,23 +548,24 @@ class GameEngine:
             total_change = sum(chip_changes.values())
             if total_change != 0:
                 # This shouldn't happen, but log if it does
-                print(f"[WARNING] _end_hand_early: chip_changes sum = {total_change}, should be 0")
-                print(f"[DEBUG] chip_changes = {chip_changes}, total_pot = {total_pot}")
+                logger.warning(f"_end_hand_early: chip_changes sum = {total_change}, should be 0")
+                logger.debug(f"chip_changes = {chip_changes}, total_pot = {total_pot}")
 
-            print(f"[DEBUG] _end_hand_early: winner={winner.user_id}, total_pot={total_pot}")
-            print(f"[DEBUG] _end_hand_early: chip_changes={chip_changes}")
-            print(f"[DEBUG] _end_hand_early: winner.total_bet={winner.total_bet}, winner.chips before={winner.chips}")
+            logger.debug(f"_end_hand_early: winner={winner.user_id}, total_pot={total_pot}")
+            logger.debug(f"_end_hand_early: chip_changes={chip_changes}")
+            logger.debug(f"_end_hand_early: winner.total_bet={winner.total_bet}, winner.chips before={winner.chips}")
 
             winner.chips += total_pot
 
-            print(f"[DEBUG] _end_hand_early: winner.chips after={winner.chips}")
+            logger.debug(f"_end_hand_early: winner.chips after={winner.chips}")
 
             # Store result for later use (in handle_hand_end)
+            # Don't expose cards when winning by fold
             self._last_result = GameResult(
                 winners=[{"user_id": winner.user_id, "amount": total_pot}],
                 pot_amount=total_pot,
                 community_cards=self.community_cards,
-                player_hands={winner.user_id: winner.hole_cards},
+                player_hands={},  # Empty - no showdown occurred
                 player_names={p.user_id: p.username for p in self.players.values()},
                 chip_changes=chip_changes
             )
@@ -557,7 +602,8 @@ class GameEngine:
 
         # Distribute winnings
         rankings_tuple = {uid: (hand.rank, hand.kickers) for uid, hand in hand_rankings.items()}
-        winnings = self.pot_manager.distribute_winnings(rankings_tuple)
+        player_positions = {p.user_id: p.seat_index for p in self.players.values()}
+        winnings = self.pot_manager.distribute_winnings(rankings_tuple, player_positions)
 
         # Award chips and update chip_changes
         for user_id, amount in winnings.items():
@@ -567,9 +613,9 @@ class GameEngine:
         # Verify: sum of all chip_changes should be 0 (conservation of chips)
         total_change = sum(chip_changes.values())
         if total_change != 0:
-            print(f"[WARNING] _showdown: chip_changes sum = {total_change}, should be 0")
-            print(f"[DEBUG] chip_changes = {chip_changes}")
-            print(f"[DEBUG] winnings = {winnings}")
+            logger.warning(f"_showdown: chip_changes sum = {total_change}, should be 0")
+            logger.debug(f"chip_changes = {chip_changes}")
+            logger.debug(f"winnings = {winnings}")
 
         # Prepare result
         winners = [
@@ -587,6 +633,7 @@ class GameEngine:
             chip_changes=chip_changes
         )
 
+        self._show_cards_at_end = True
         self.phase = GamePhase.ENDED
         # Don't call on_hand_complete here - it will be called in handle_hand_end
 
@@ -615,6 +662,7 @@ class GameEngine:
             "players": [
                 p.to_dict(show_cards=(
                     self.phase == GamePhase.SHOWDOWN or
+                    (getattr(self, '_show_cards_at_end', False) and p.is_in_hand()) or
                     for_user_id == p.user_id
                 ))
                 for p in self.players.values()

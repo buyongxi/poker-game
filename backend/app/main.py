@@ -22,16 +22,19 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_db()
 
-    # Create initial admin if no users exist
-    async with async_session() as db:
-        user_service = UserService(db)
-        created = await user_service.create_initial_admin(
-            username=settings.ADMIN_USERNAME,
-            password=settings.ADMIN_PASSWORD,
-            display_name=settings.ADMIN_DISPLAY_NAME
-        )
-        if created:
-            print(f"Initial admin created: {settings.ADMIN_USERNAME}")
+    # Create initial admin if credentials are provided
+    if settings.ADMIN_USERNAME and settings.ADMIN_PASSWORD:
+        async with async_session() as db:
+            user_service = UserService(db)
+            created = await user_service.create_initial_admin(
+                username=settings.ADMIN_USERNAME,
+                password=settings.ADMIN_PASSWORD,
+                display_name=settings.ADMIN_DISPLAY_NAME or "管理员"
+            )
+            if created:
+                print(f"Initial admin created: {settings.ADMIN_USERNAME}")
+    else:
+        print("No admin credentials provided, skipping admin creation")
 
     yield
     # Shutdown

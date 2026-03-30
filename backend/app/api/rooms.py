@@ -104,6 +104,10 @@ async def delete_room(
     if room.status == RoomStatus.PLAYING:
         raise HTTPException(status_code=400, detail="游戏中不能删除房间")
 
+    # Clean up WebSocket resources before deleting
+    from app.websocket.manager import manager
+    manager.remove_room(room_id)
+
     await room_service.delete_room(room_id)
     return {"message": "房间已删除"}
 

@@ -10,13 +10,23 @@ export const useGameStore = defineStore('game', () => {
   const connected = ref(false)
   const ws = ref<WebSocket | null>(null)
   const reconnectAttempts = ref(0)
+  const maxReconnectAttempts = 5
+  const reconnectDelay = 3000
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let currentRoomId: number | null = null
+  let currentToken: string | null = null
 
   function connect(roomId: number, token: string) {
+    currentRoomId = roomId
+    currentToken = token
+
     if (ws.value) {
       ws.value.close()
     }
 
-    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/room/${roomId}?token=${token}`
+    const wsBaseUrl = import.meta.env.VITE_WS_BASE_URL ||
+      `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
+    const wsUrl = `${wsBaseUrl}/ws/room/${roomId}?token=${token}`
     ws.value = new WebSocket(wsUrl)
 
     ws.value.onopen = () => {
@@ -33,6 +43,7 @@ export const useGameStore = defineStore('game', () => {
     ws.value.onclose = () => {
       connected.value = false
       console.log('WebSocket disconnected')
+      attemptReconnect()
     }
 
     ws.value.onerror = (error) => {
@@ -40,7 +51,34 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
+  function attemptReconnect() {
+    if (reconnectAttempts.value >= maxReconnectAttempts) {
+      console.log('Max reconnect attempts reached')
+      return
+    }
+
+    if (!currentRoomId || !currentToken) {
+      return
+    }
+
+    reconnectAttempts.value++
+    console.log(`Reconnecting... attempt ${reconnectAttempts.value}`)
+
+    reconnectTimer = setTimeout(() => {
+      connect(currentRoomId!, currentToken!)
+    }, reconnectDelay)
+  }
+
   function disconnect() {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
+
+    currentRoomId = null
+    currentToken = null
+    reconnectAttempts.value = 0
+
     if (ws.value) {
       ws.value.close()
       ws.value = null
@@ -161,12 +199,6 @@ export const useGameStore = defineStore('game', () => {
     }
   }
 
-  function sendNextHand() {
-    if (ws.value && connected.value) {
-      ws.value.send(JSON.stringify({ type: 'next_hand', data: {} }))
-    }
-  }
-
   function sendStopGame() {
     if (ws.value && connected.value) {
       ws.value.send(JSON.stringify({ type: 'stop_game', data: {} }))
@@ -185,7 +217,6 @@ export const useGameStore = defineStore('game', () => {
     sendStartGame,
     sendAction,
     sendChat,
-    sendNextHand,
     sendStopGame
   }
 })

@@ -39,8 +39,12 @@ pip install -r requirements.txt
 # 复制环境配置
 cp .env.example .env
 
-# 启动服务器
-python run.py
+# 启动服务器（可选创建初始管理员）
+# 注意：管理员密码不要使用弱口令
+python run.py --admin-username admin --admin-password <YOUR_ADMIN_PASSWORD>
+
+# 或自定义玩家操作超时（默认30秒）
+python run.py --admin-username admin --admin-password <YOUR_ADMIN_PASSWORD> --action-timeout 60
 ```
 
 后端将在 http://localhost:8000 运行。
@@ -53,23 +57,14 @@ cd frontend
 # 安装依赖
 npm install
 
+# （可选）复制环境变量示例
+cp .env.example .env.development
+
 # 启动开发服务器
 npm run dev
 ```
 
 前端将在 http://localhost:5173 运行。
-
-### 初始化管理员账户
-
-首次运行时，调用以下 API 创建初始管理员账户：
-
-```bash
-curl -X POST http://localhost:8000/api/admin/init-admin
-```
-
-默认管理员账户：
-- 用户名: `admin`
-- 密码: `admin123`
 
 ## 项目结构
 
@@ -128,7 +123,7 @@ curl -X POST http://localhost:8000/api/admin/init-admin
 
 ## 配置项
 
-编辑 `backend/.env` 文件：
+从 `backend/.env.example` 复制到 `backend/.env` 后编辑：
 
 ```env
 DEBUG=true
@@ -137,7 +132,24 @@ MAX_USERS=20
 MAX_ROOMS=10
 ACTION_TIMEOUT=30        # 操作超时（秒）
 RECONNECT_TIMEOUT=300    # 重连超时（秒）
+
+# 管理员账户（可选：留空则启动时不会自动创建管理员）
+ADMIN_USERNAME=
+ADMIN_PASSWORD=
+ADMIN_DISPLAY_NAME=
 ```
+
+或通过命令行参数启动：
+
+```bash
+python run.py --admin-username admin --admin-password <YOUR_ADMIN_PASSWORD> --action-timeout 60
+```
+
+命令行参数说明：
+- `--admin-username`: 初始管理员用户名
+- `--admin-password`: 初始管理员密码
+- `--admin-display-name`: 初始管理员显示名称（默认：管理员）
+- `--action-timeout`: 玩家操作超时时间（秒，默认：30）
 
 ## API 文档
 

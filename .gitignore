@@ -38,6 +38,12 @@ env/
 .env.local
 .env.*.local
 
+# Frontend/Backend env files (keep example files)
+frontend/.env.*
+!frontend/.env.example
+backend/.env.*
+!backend/.env.example
+
 # Database
 *.db
 *.sqlite
@@ -63,6 +69,9 @@ yarn-error.log*
 # Build output
 frontend/dist/
 frontend/.output/
+
+# Local-only card resources backup (do not publish)
+frontend/public/cards_backup/
 
 # Test coverage
 htmlcov/

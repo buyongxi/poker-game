@@ -61,10 +61,6 @@ class Player:
         self.status = PlayerStatus.FOLDED
         self.is_current = False
 
-    def check(self) -> bool:
-        """Player checks. Returns True if valid."""
-        return self.current_bet == 0
-
     def call(self, amount: int) -> int:
         """
         Player calls. Returns actual amount called.
@@ -111,6 +107,10 @@ class Player:
         self.chips -= actual
         self.current_bet = actual
         self.total_bet = actual
+
+        if self.chips == 0:
+            self.status = PlayerStatus.ALL_IN
+
         return actual
 
     def can_act(self) -> bool:

@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 
@@ -8,6 +9,12 @@ from app.services.user_service import UserService
 from app.api.auth import get_current_admin_user
 
 router = APIRouter()
+
+
+class InitAdminBody(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+    display_name: str = "管理员"
 
 
 @router.get("/pending", response_model=List[UserResponse])
@@ -80,14 +87,14 @@ async def set_admin(
 
 @router.post("/init-admin")
 async def init_admin(
-    username: str = Body("admin", embed=True),
-    password: str = Body("admin123", embed=True),
-    display_name: str = Body("管理员", embed=True),
+    body: InitAdminBody,
     db: AsyncSession = Depends(get_db)
 ):
-    """Create initial admin user if no users exist."""
+    """Create initial admin user if no users exist. Must provide username and password (no defaults)."""
     user_service = UserService(db)
-    admin = await user_service.create_initial_admin(username, password, display_name)
+    admin = await user_service.create_initial_admin(
+        body.username, body.password, body.display_name
+    )
     if admin:
-        return {"message": "管理员账户已创建", "username": username}
+        return {"message": "管理员账户已创建", "username": body.username}
     return {"message": "用户已存在，无法创建初始管理员"}

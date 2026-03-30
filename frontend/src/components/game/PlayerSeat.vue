@@ -10,7 +10,7 @@
     }"
     :style="seatStyle"
   >
-    <div class="seat-content">
+    <div class="seat-content" :class="{ 'has-occupant': !!seat.user_id }">
       <!-- Player Info -->
       <div class="player-info" v-if="seat.user_id">
         <div class="player-name">
@@ -22,8 +22,8 @@
         <div class="player-net" :class="seat.net_chips >= 0 ? 'net-positive' : 'net-negative'">
           净: {{ seat.net_chips >= 0 ? '+' : '' }}{{ seat.net_chips }}
         </div>
-        <div class="player-bet" v-if="player?.current_bet">
-          下注: {{ player.current_bet }}
+        <div class="player-bet-row">
+          <span v-if="player?.current_bet">下注: {{ player.current_bet }}</span>
         </div>
         <div class="player-status">
           <span v-if="player?.is_dealer" class="dealer-btn">D</span>
@@ -37,16 +37,21 @@
         <span>空位</span>
       </div>
 
-      <!-- Player Cards -->
-      <div class="player-cards" v-if="player && player.cards.length > 0">
-        <div
-          v-for="(card, index) in player.cards"
-          :key="index"
-          class="mini-card"
-          :class="getSuitClass(card.suit)"
-        >
-          {{ card.rank }}{{ getSuitSymbol(card.suit) }}
-        </div>
+      <!-- Player Cards：占位保持高度，避免有牌/无牌时布局跳动 -->
+      <div v-if="seat.user_id && player" class="player-cards">
+        <template v-if="player.cards.length > 0">
+          <div
+            v-for="(card, index) in player.cards"
+            :key="index"
+            class="mini-card"
+            :class="getSuitClass(card.suit)"
+          >
+            {{ card.rank }}{{ getSuitSymbol(card.suit) }}
+          </div>
+        </template>
+        <template v-else>
+          <div v-for="i in 2" :key="'ph-' + i" class="mini-card mini-card-placeholder" aria-hidden="true" />
+        </template>
       </div>
 
       <!-- Folded Overlay -->
@@ -124,6 +129,14 @@ function getSuitSymbol(suit: string) {
   text-align: center;
   position: relative;
   border: 2px solid transparent;
+  min-height: 120px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.seat-content.has-occupant {
+  min-height: 152px;
 }
 
 .player-seat.is-current .seat-content {
@@ -189,7 +202,8 @@ function getSuitSymbol(suit: string) {
   color: #f56c6c;
 }
 
-.player-bet {
+.player-bet-row {
+  min-height: 16px;
   font-size: 11px;
   color: #67c23a;
 }
@@ -242,6 +256,18 @@ function getSuitSymbol(suit: string) {
   justify-content: center;
   gap: 2px;
   margin-top: 4px;
+  height: 32px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.mini-card-placeholder {
+  box-sizing: border-box;
+  width: 24px;
+  height: 32px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 3px;
 }
 
 .mini-card {

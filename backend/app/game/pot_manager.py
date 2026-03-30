@@ -101,10 +101,11 @@ class PotManager:
             # Eligibility: only active and all-in players can win
             if pot_amount > 0:
                 pot.amount = pot_amount
-                # Only active and all-in players are eligible to win
-                for player_id in active_players + all_in_players:
+                # Only active and all-in players are eligible to win (deduplicated)
+                eligible_set = set(active_players) | set(all_in_players)
+                for player_id in eligible_set:
                     player_total = self.player_total_bets.get(player_id, 0)
-                    if player_total > prev_level and player_id not in pot.eligible_players:
+                    if player_total > prev_level:
                         pot.eligible_players.append(player_id)
                 self.pots.append(pot)
 
@@ -122,7 +123,8 @@ class PotManager:
 
     def distribute_winnings(
         self,
-        hand_rankings: Dict[int, Tuple]  # user_id -> (hand_rank, kickers)
+        hand_rankings: Dict[int, Tuple],  # user_id -> (hand_rank, kickers)
+        player_positions: Dict[int, int] = None  # user_id -> seat_index for tie-breaking
     ) -> Dict[int, int]:
         """
         Distribute winnings based on hand rankings.
@@ -155,13 +157,17 @@ class PotManager:
                 if hand == best_hand
             ]
 
+            # Sort winners by seat position for fair remainder distribution
+            if player_positions:
+                winners.sort(key=lambda pid: player_positions.get(pid, 999))
+
             # Split pot among winners
             win_amount = pot.amount // len(winners)
             remainder = pot.amount % len(winners)
 
             for i, winner_id in enumerate(winners):
                 winnings[winner_id] = winnings.get(winner_id, 0) + win_amount
-                # First winner gets remainder (arbitrary but consistent)
+                # First winner (earliest position) gets remainder
                 if i == 0:
                     winnings[winner_id] += remainder
 

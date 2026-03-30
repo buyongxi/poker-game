@@ -2,7 +2,7 @@ import axios from 'axios'
 import type { User, LoginRequest, RegisterRequest, Token } from '@/types'
 
 const api = axios.create({
-  baseURL: '/api',
+  baseURL: import.meta.env.VITE_API_BASE_URL ? `${import.meta.env.VITE_API_BASE_URL}/api` : '/api',
   headers: {
     'Content-Type': 'application/json'
   }
@@ -81,8 +81,16 @@ export const adminApi = {
     await api.post(`/admin/users/${userId}/enable`)
   },
 
-  async initAdmin(): Promise<{ message: string; username?: string; password?: string }> {
-    const response = await api.post('/admin/init-admin')
+  async initAdmin(
+    username: string,
+    password: string,
+    displayName = '管理员'
+  ): Promise<{ message: string; username?: string }> {
+    const response = await api.post('/admin/init-admin', {
+      username,
+      password,
+      display_name: displayName
+    })
     return response.data
   }
 }

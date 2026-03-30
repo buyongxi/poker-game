@@ -72,11 +72,11 @@ class UserService:
 
     async def create_initial_admin(
         self,
-        username: str = "admin",
-        password: str = "admin123",
+        username: str,
+        password: str,
         display_name: str = "管理员"
     ) -> Optional[User]:
-        """Create initial admin user if no users exist."""
+        """Create initial admin user if no users exist. Caller must supply credentials (no defaults)."""
         result = await self.db.execute(select(User))
         if result.scalars().first():
             return None
