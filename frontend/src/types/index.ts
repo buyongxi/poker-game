@@ -80,6 +80,7 @@ export interface PlayerState {
   is_sb: boolean
   is_bb: boolean
   is_current: boolean
+  is_in_hand?: boolean
 }
 
 export interface PotInfo {

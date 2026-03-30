@@ -69,7 +69,7 @@
         <div class="my-info" v-if="myPlayer">
           <span>筹码: {{ myPlayer.chips }}</span>
           <span>当前下注: {{ myPlayer.current_bet }}</span>
-          <span>净筹码: <span :class="mySeat?.net_chips >= 0 ? 'net-positive' : 'net-negative'">{{ mySeat?.net_chips >= 0 ? '+' : '' }}{{ mySeat?.net_chips }}</span></span>
+          <span>净筹码: <span :class="(mySeat?.net_chips ?? 0) >= 0 ? 'net-positive' : 'net-negative'">{{ (mySeat?.net_chips ?? 0) >= 0 ? '+' : '' }}{{ mySeat?.net_chips ?? 0 }}</span></span>
         </div>
 
         <div class="action-turn-zone">

@@ -92,6 +92,14 @@ export const adminApi = {
       display_name: displayName
     })
     return response.data
+  },
+
+  async setAdmin(userId: number, isAdmin: boolean): Promise<void> {
+    const response = await api.post('/admin/set-admin', {
+      user_id: userId,
+      is_admin: isAdmin
+    })
+    return response.data
   }
 }
 
