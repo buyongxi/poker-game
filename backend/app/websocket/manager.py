@@ -623,6 +623,12 @@ async def handle_hand_complete(room_id: int, result):
         hand_info = f" ({winner['hand']})" if winner.get("hand") else ""
         result_lines.append(f"🏆 {winner_name} 赢得 {winner['amount']} 筹码{hand_info}")
 
+    # Add community cards if any were dealt
+    if result.community_cards and len(result.community_cards) > 0:
+        result_lines.append("--- 公共牌 ---")
+        cards_str = " ".join([f"{c.rank}{get_suit_symbol(c.suit)}" for c in result.community_cards])
+        result_lines.append(cards_str)
+
     # Add showdown hands if available (only for players who showed cards)
     if result.player_hands and len(result.player_hands) > 0:
         result_lines.append("--- 开牌信息 ---")
