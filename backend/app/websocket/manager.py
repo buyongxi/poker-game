@@ -414,12 +414,12 @@ async def handle_message(
             return
 
         # Check if waiting for next hand (after HAND_END_DELAY)
+        # 如果房主想手动开始下一局，允许跳过等待
         if manager.waiting_for_next_hand.get(room_id, False):
-            await websocket.send_json({
-                "type": "error",
-                "data": {"message": "正在等待开始下一局，请稍候"}
-            })
-            return
+            # 房主可以跳过等待直接开始下一局
+            logger.info(f"Owner {user_id} requested to start game during HAND_END_DELAY, skipping wait")
+            manager.waiting_for_next_hand[room_id] = False
+            # 继续执行下面的开始游戏逻辑
 
         game = manager.get_game(room_id)
         if game and game.phase not in [GamePhase.ENDED]:
@@ -618,6 +618,12 @@ async def handle_timeout_fold(room_id: int, user_id: int):
 
     current_player = game.get_current_player()
     if not current_player or current_player.user_id != user_id:
+        # 超时触发时当前玩家已改变，跳过弃牌
+        # 这可能是由于其他玩家快速行动或其他原因导致
+        logger.info(
+            f"Timeout skip: room_id={room_id}, timed_out_user={user_id}, "
+            f"current_player={current_player.user_id if current_player else 'None'}"
+        )
         return
 
     logger.debug(f"Player {user_id} timed out, auto-folding")
@@ -1046,9 +1052,16 @@ async def handle_hand_end(room_id: int):
             # This gives players time to see the results before next hand starts
             await asyncio.sleep(settings.HAND_END_DELAY)
 
+            # Check if owner has requested to start game manually (flag was set to False)
+            if not manager.waiting_for_next_hand.get(room_id, True):
+                # Owner took control, skip auto-start
+                logger.info(f"Owner took control, skipping auto-start for room {room_id}")
+                return
+
             # Prepare and start next hand
             await _prepare_and_start_next_hand(game, room_id, room, room_service, previous_hand_players)
         finally:
             # Clear flag after delay completes or fails
-            if room_id in manager.waiting_for_next_hand:
+            # Only clear if it's still True (owner didn't take control)
+            if manager.waiting_for_next_hand.get(room_id, False):
                 del manager.waiting_for_next_hand[room_id]

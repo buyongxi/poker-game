@@ -155,9 +155,12 @@ class GameEngine:
 
     def _set_positions(self) -> None:
         """Set dealer, SB, BB positions."""
+        # 使用统一的活跃玩家判断条件：READY 或 PLAYING 或 is_in_hand()
+        # 这与 _next_active_player() 的判断条件保持一致
         active_players = [
             uid for uid in self.player_order
-            if self.players[uid].status == PlayerStatus.READY
+            if self.players[uid].status in [PlayerStatus.READY, PlayerStatus.PLAYING]
+            or self.players[uid].is_in_hand()
         ]
 
         if len(active_players) < 2:
@@ -196,8 +199,9 @@ class GameEngine:
             idx = (from_index + i) % n
             uid = self.player_order[idx]
             player = self.players[uid]
-            # Include both READY (preflop before cards dealt) and PLAYING states
-            if player.status in [PlayerStatus.READY, PlayerStatus.PLAYING] or player.is_in_hand():
+            # 统一使用 is_in_hand() 或状态为 READY/PLAYING 来判断活跃玩家
+            # is_in_hand() 返回 True 如果状态是 PLAYING 或 ALL_IN
+            if player.is_in_hand() or player.status == PlayerStatus.READY:
                 return idx
         return from_index
 
@@ -225,6 +229,10 @@ class GameEngine:
             if player.status == PlayerStatus.READY:
                 cards = self.deck.deal(2)
                 player.deal_cards(cards)
+                # 注意：deal_cards() 会将状态改为 PLAYING
+                # 如果玩家盲注后筹码为 0，需要恢复 ALL_IN 状态
+                if player.chips == 0 and player.total_bet > 0:
+                    player.status = PlayerStatus.ALL_IN
             elif player.status == PlayerStatus.ALL_IN:
                 # Player went all-in posting blind - deal cards but keep ALL_IN status
                 cards = self.deck.deal(2)
@@ -244,7 +252,11 @@ class GameEngine:
         # No player can act (all ALL_IN) - check if round complete and advance
         self.current_player_index = self._next_active_player(self.bb_index)
         if self._is_betting_round_complete():
-            self._advance_phase()  # Return value ignored - preflop all-in runs out community cards
+            # 翻牌前全押，无需玩家行动，直接发完公共牌
+            # _advance_phase() 返回 False 表示无需行动（all-in 情况）
+            needs_action = self._advance_phase()
+            # 断言验证：翻牌前全押不应需要玩家行动
+            assert needs_action == False, "Preflop all-in should not require player action"
 
     def get_current_player(self) -> Optional[Player]:
         """Get the player whose turn it is."""
@@ -565,9 +577,12 @@ class GameEngine:
             # Verify: sum of all chip_changes should be 0 (conservation of chips)
             total_change = sum(chip_changes.values())
             if total_change != 0:
-                # This shouldn't happen, but log if it does
-                logger.warning(f"_end_hand_early: chip_changes sum = {total_change}, should be 0")
+                # 筹码守恒被破坏，这是严重错误
+                logger.error(f"_end_hand_early: chip_changes sum = {total_change}, should be 0")
                 logger.debug(f"chip_changes = {chip_changes}, total_pot = {total_pot}")
+                # 在开发环境抛出异常，便于及时发现 bug
+                if settings.DEBUG:
+                    raise AssertionError(f"Chip conservation violated in _end_hand_early: sum = {total_change}")
 
             logger.debug(f"_end_hand_early: winner={winner.user_id}, total_pot={total_pot}")
             logger.debug(f"_end_hand_early: chip_changes={chip_changes}")
@@ -632,9 +647,13 @@ class GameEngine:
         # Verify: sum of all chip_changes should be 0 (conservation of chips)
         total_change = sum(chip_changes.values())
         if total_change != 0:
-            logger.warning(f"_showdown: chip_changes sum = {total_change}, should be 0")
+            # 筹码守恒被破坏，这是严重错误
+            logger.error(f"_showdown: chip_changes sum = {total_change}, should be 0")
             logger.debug(f"chip_changes = {chip_changes}")
             logger.debug(f"winnings = {winnings}")
+            # 在开发环境抛出异常，便于及时发现 bug
+            if settings.DEBUG:
+                raise AssertionError(f"Chip conservation violated in _showdown: sum = {total_change}")
 
         # Prepare result
         winners = [
