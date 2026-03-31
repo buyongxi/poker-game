@@ -131,6 +131,21 @@ class ConnectionManager:
 
         self.timeout_tasks[room_id] = asyncio.create_task(delayed_timeout_task())
 
+    def start_timeout(self, room_id: int, user_id: int, game: GameEngine):
+        """Start a timeout task for the current player immediately."""
+        self.cancel_timeout(room_id)
+
+        # Record action start time
+        self.action_start_times[room_id] = time.time()
+
+        async def timeout_task():
+            # Wait for action timeout
+            await asyncio.sleep(game.action_timeout)
+            # Timeout occurred - auto fold
+            await handle_timeout_fold(room_id, user_id)
+
+        self.timeout_tasks[room_id] = asyncio.create_task(timeout_task())
+
     def get_remaining_time(self, room_id: int, game: GameEngine) -> Optional[int]:
         """Get remaining time for current action in seconds."""
         if room_id not in self.action_start_times:

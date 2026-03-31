@@ -285,7 +285,8 @@ class GameEngine:
             player.chips > 0
         )
 
-        if can_raise:
+        # If min_raise is None, raises are closed (after an all-in that didn't fully raise)
+        if can_raise and self.min_raise is not None:
             min_raise_total = self.current_bet + self.min_raise
             max_raise = player.chips + player.current_bet
 
@@ -343,8 +344,11 @@ class GameEngine:
             self.pot_manager.add_bet(user_id, actual)
 
         elif action == ActionType.RAISE:
+            # If min_raise is None, raises are closed (after an all-in that didn't fully raise)
+            if self.min_raise is None:
+                return False, "当前轮次不允许加注"
             if amount < self.current_bet + self.min_raise:
-                return False, f"加注金额不足，最小加注: {self.current_bet + self.min_raise}"
+                return False, f"加注金额不足，最小加注：{self.current_bet + self.min_raise}"
             if amount > player.chips + player.current_bet:
                 return False, "筹码不足"
 
@@ -373,9 +377,9 @@ class GameEngine:
                     self.acted_this_round = {user_id}
                 else:
                     # Not a full raise - update current bet but don't reopen betting
-                    # Set min_raise to a very large value to prevent further raises
+                    # Set min_raise to None to prevent further raises this round
                     self.current_bet = player.current_bet
-                    self.min_raise = 10_000_000  # Large enough to prevent raises
+                    self.min_raise = None  # Mark that raises are closed
 
         else:
             return False, "无效操作"
@@ -502,12 +506,20 @@ class GameEngine:
     def _deal_turn(self) -> None:
         """Deal turn (1 community card)."""
         self.deck.burn()
-        self.community_cards.append(self.deck.deal_one())
+        card = self.deck.deal_one()
+        if card:
+            self.community_cards.append(card)
+        else:
+            logger.error("deck.deal_one() returned None in _deal_turn")
 
     def _deal_river(self) -> None:
         """Deal river (1 community card)."""
         self.deck.burn()
-        self.community_cards.append(self.deck.deal_one())
+        card = self.deck.deal_one()
+        if card:
+            self.community_cards.append(card)
+        else:
+            logger.error("deck.deal_one() returned None in _deal_river")
 
     def _run_out_community_cards(self) -> None:
         """Deal remaining community cards for all-in situation."""
@@ -576,6 +588,7 @@ class GameEngine:
                 chip_changes=chip_changes
             )
 
+            self._show_cards_at_end = True  # Show winner's cards at end
             self.phase = GamePhase.ENDED
             # Don't call on_hand_complete here - it will be called in handle_hand_end
 
@@ -660,7 +673,7 @@ class GameEngine:
             "pots": self.pot_manager.to_dict(),
             "current_pot": self.pot_manager.get_total_pot(),
             "current_bet": self.current_bet,
-            "min_raise": self.current_bet + self.min_raise,  # Total amount needed for min raise
+            "min_raise": self.current_bet + self.min_raise if self.min_raise is not None else None,  # Total amount needed for min raise
             "current_player_id": self.player_order[self.current_player_index] if self.player_order and self.current_player_index < len(self.player_order) else None,
             "dealer_seat": self.players[self.player_order[self.dealer_index]].seat_index if self.player_order and self.dealer_index < len(self.player_order) else 0,
             "sb_seat": self.players[self.player_order[self.sb_index]].seat_index if self.player_order and self.sb_index < len(self.player_order) else 0,
