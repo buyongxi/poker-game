@@ -7,9 +7,11 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.box import ROUNDED
 from typing import Optional, Dict, List, Any
 
-from .api_client import SyncAPIClient, User
+from api_client import SyncAPIClient, User
+from ui.admin import AdminManager
 
 
 console = Console()
@@ -44,6 +46,7 @@ class LobbyManager:
                 room = self._create_room()
                 if room:
                     self.current_room = room
+                    # 创建房间后自动进入
                     return room
             elif choice == "2":
                 # 加入房间
@@ -57,6 +60,17 @@ class LobbyManager:
             elif choice == "3":
                 # 刷新
                 continue
+            elif choice == "4":
+                # 管理员功能（仅管理员）
+                if self.current_user.role == 'admin':
+                    # 清屏后进入管理员界面
+                    console.clear()
+                    admin_manager = AdminManager(self.api_client, self.current_user)
+                    admin_manager.run()
+                    # 管理员界面退出后清屏，重新绘制大厅
+                    console.clear()
+                else:
+                    console.print("\n[yellow]只有管理员可以访问此功能。[/yellow]\n")
             elif choice == "q":
                 return None
 
@@ -76,18 +90,22 @@ class LobbyManager:
 
         console.print(text)
 
-        # 用户信息
-        console.print(f"  当前用户：[yellow]{self.current_user.display_name}[/yellow]  |  筹码：[green]${self.current_user.chips}[/green]\n")
+        # 用户信息 - 管理员显示特殊标识
+        # 注意：chips 在这里仅用于参考，实际游戏中的筹码以座位信息为准
+        if self.current_user.role == 'admin':
+            console.print(f"  当前用户：[bold magenta]{self.current_user.display_name}[/bold magenta] [magenta]⚙ 管理员[/magenta]\n")
+        else:
+            console.print(f"  当前用户：[yellow]{self.current_user.display_name}[/yellow]\n")
 
         # 房间表格
         if rooms:
-            table = Table(title="可用房间", box="DOUBLE", expand=True)
-            table.add_column("ID", style="dim", width=6, justify="right")
-            table.add_column("房间名称", style="bold", width=20)
-            table.add_column("盲注", width=10, justify="right")
-            table.add_column("买入", width=10, justify="right")
-            table.add_column("玩家", width=10, justify="center")
-            table.add_column("状态", width=10, justify="center")
+            table = Table(title="可用房间", box=ROUNDED, expand=True)
+            table.add_column("ID", style="dim", justify="right")
+            table.add_column("房间名称", style="bold")
+            table.add_column("盲注", justify="right")
+            table.add_column("买入", justify="right")
+            table.add_column("玩家", justify="center")
+            table.add_column("状态", justify="center")
 
             for room in rooms:
                 status_style = "green" if room.get("status") == "waiting" else "yellow"
@@ -115,13 +133,21 @@ class LobbyManager:
         console.print("  [1] 创建房间")
         console.print("  [2] 加入房间" if rooms else "  [2] 加入房间 [dim](暂无房间)[/dim]")
         console.print("  [3] 刷新列表")
-        console.print("  [q] 返回\n")
-
-        return Prompt.ask(
-            "[bold yellow]请输入选项[/bold yellow]",
-            choices=["1", "2", "3", "q"],
-            default="1"
-        )
+        if self.current_user.role == 'admin':
+            console.print("  [4] 管理后台 [magenta]⚙ 管理员[/magenta]")
+            console.print("  [q] 返回\n")
+            return Prompt.ask(
+                "[bold yellow]请输入选项[/bold yellow]",
+                choices=["1", "2", "3", "4", "q"],
+                default="1"
+            )
+        else:
+            console.print("  [q] 返回\n")
+            return Prompt.ask(
+                "[bold yellow]请输入选项[/bold yellow]",
+                choices=["1", "2", "3", "q"],
+                default="1"
+            )
 
     def _create_room(self) -> Optional[Dict]:
         """创建房间。"""

@@ -2,6 +2,10 @@
 
 基于 Python Rich 库的命令行德州扑克游戏界面，支持在线联网和离线本地游戏。
 
+## 快速参考
+
+详细文档请参阅 [QUICKSTART.md](QUICKSTART.md)。
+
 ## 快速开始
 
 ### 安装

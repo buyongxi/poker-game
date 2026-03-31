@@ -38,6 +38,12 @@
    # 前端检查
    cd frontend
    npm ci && npm run build
+
+   # 终端前端检查
+   cd terminal
+   pip install -r requirements.txt
+   python test_features.py  # 功能测试
+   python -m py_compile *.py  # 语法检查
    ```
 
 6. **提交更改**
@@ -115,6 +121,13 @@ refactor(engine): 简化下注逻辑
 - 组件使用 PascalCase
 - 变量和函数使用 camelCase
 - 优先使用组合式 API (Composition API)
+
+### Python (终端前端)
+- 遵循 PEP 8 规范
+- 使用类型注解
+- 函数和变量使用 snake_case
+- 类使用 PascalCase
+- 使用 Rich 库进行终端美化
 
 ## 问题反馈
 

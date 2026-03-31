@@ -5,7 +5,7 @@ API 客户端模块 - 连接后端 REST API
 """
 
 import httpx
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from dataclasses import dataclass
 import json
 
@@ -16,7 +16,9 @@ class User:
     id: int
     username: str
     display_name: str
-    chips: int
+    chips: int = 1000
+    role: str = "user"  # "user" 或 "admin"
+    status: str = "active"  # "active", "pending", "disabled"
 
 
 @dataclass
@@ -86,7 +88,8 @@ class APIClient:
                         self.current_user = user_result
                         return LoginResult(success=True, token=self.token, user=user_result)
 
-                    return LoginResult(success=True, token=self.token)
+                    # 获取用户信息失败，认为登录失败
+                    return LoginResult(success=False, error="获取用户信息失败")
                 else:
                     error_data = response.json()
                     return LoginResult(success=False, error=error_data.get("detail", "登录失败"))
@@ -127,7 +130,7 @@ class APIClient:
                             id=result["id"],
                             username=result["username"],
                             display_name=result["display_name"],
-                            chips=result["chips"]
+                            chips=result.get("chips", 1000)
                         )
                     )
                 else:
@@ -156,7 +159,9 @@ class APIClient:
                         id=result["id"],
                         username=result["username"],
                         display_name=result["display_name"],
-                        chips=result["chips"]
+                        chips=result.get("chips", 1000),
+                        role=result.get("role", "user"),
+                        status=result.get("status", "active")
                     )
         except Exception:
             pass
@@ -270,7 +275,8 @@ class SyncAPIClient:
                         self.current_user = user_result
                         return LoginResult(success=True, token=self.token, user=user_result)
 
-                    return LoginResult(success=True, token=self.token)
+                    # 获取用户信息失败，认为登录失败
+                    return LoginResult(success=False, error="获取用户信息失败")
                 else:
                     error_data = response.json()
                     return LoginResult(success=False, error=error_data.get("detail", "登录失败"))
@@ -301,7 +307,7 @@ class SyncAPIClient:
                             id=result["id"],
                             username=result["username"],
                             display_name=result["display_name"],
-                            chips=result["chips"]
+                            chips=result.get("chips", 1000)
                         )
                     )
                 else:
@@ -330,20 +336,23 @@ class SyncAPIClient:
                         id=result["id"],
                         username=result["username"],
                         display_name=result["display_name"],
-                        chips=result["chips"]
+                        chips=result.get("chips", 1000),
+                        role=result.get("role", "user"),
+                        status=result.get("status", "active")
                     )
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] get_current_user error: {e}")
             pass
 
         return None
 
     def get_rooms(self) -> list:
         """获取房间列表（同步版本）。"""
-        url = f"{self.base_url}/api/rooms"
+        url = f"{self.base_url}/api/rooms/"
 
         try:
             with httpx.Client() as client:
-                response = client.get(url, headers=self._get_headers())
+                response = client.get(url, headers=self._get_headers(), follow_redirects=True)
 
                 if response.status_code == 200:
                     return response.json()
@@ -356,7 +365,7 @@ class SyncAPIClient:
                     small_blind: int = 10, big_blind: int = 20,
                     max_buyin: int = 2000) -> Optional[Dict]:
         """创建房间（同步版本）。"""
-        url = f"{self.base_url}/api/rooms"
+        url = f"{self.base_url}/api/rooms/"
         data = {
             "name": name,
             "max_seats": max_seats,
@@ -367,12 +376,14 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, json=data, headers=self._get_headers())
+                response = client.post(url, json=data, headers=self._get_headers(), follow_redirects=True)
 
                 if response.status_code == 200:
                     return response.json()
-        except Exception:
-            pass
+                else:
+                    print(f"[DEBUG] 创建房间失败：{response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"[DEBUG] 创建房间异常：{e}")
 
         return None
 
@@ -383,7 +394,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, json=data, headers=self._get_headers())
+                response = client.post(url, json=data, headers=self._get_headers(), follow_redirects=True)
 
                 if response.status_code == 200:
                     return response.json()
@@ -398,7 +409,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, headers=self._get_headers())
+                response = client.post(url, headers=self._get_headers(), follow_redirects=True)
                 return response.status_code == 200
         except Exception:
             return False
@@ -410,7 +421,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, json=data, headers=self._get_headers())
+                response = client.post(url, json=data, headers=self._get_headers(), follow_redirects=True)
 
                 if response.status_code == 200:
                     return response.json()
@@ -426,7 +437,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, json=data, headers=self._get_headers())
+                response = client.post(url, json=data, headers=self._get_headers(), follow_redirects=True)
 
                 if response.status_code == 200:
                     return response.json()
@@ -441,7 +452,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, headers=self._get_headers())
+                response = client.post(url, headers=self._get_headers(), follow_redirects=True)
                 return response.status_code == 200
         except Exception:
             return False
@@ -452,7 +463,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, headers=self._get_headers())
+                response = client.post(url, headers=self._get_headers(), follow_redirects=True)
                 return response.status_code == 200
         except Exception:
             return False
@@ -463,7 +474,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, headers=self._get_headers())
+                response = client.post(url, headers=self._get_headers(), follow_redirects=True)
                 return response.status_code == 200
         except Exception:
             return False
@@ -474,7 +485,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, headers=self._get_headers())
+                response = client.post(url, headers=self._get_headers(), follow_redirects=True)
                 return response.status_code == 200
         except Exception:
             return False
@@ -486,7 +497,7 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, json=data, headers=self._get_headers())
+                response = client.post(url, json=data, headers=self._get_headers(), follow_redirects=True)
                 return response.status_code == 200
         except Exception:
             return False
@@ -500,7 +511,89 @@ class SyncAPIClient:
 
         try:
             with httpx.Client() as client:
-                response = client.post(url, json=data, headers=self._get_headers())
+                response = client.post(url, json=data, headers=self._get_headers(), follow_redirects=True)
                 return response.status_code == 200
         except Exception:
             return False
+
+    # ========== 管理员 API ==========
+
+    def get_pending_users(self) -> List[Dict]:
+        """获取待审核用户列表（管理员专用）。"""
+        url = f"{self.base_url}/api/admin/pending"
+
+        try:
+            with httpx.Client() as client:
+                response = client.get(url, headers=self._get_headers(), follow_redirects=True)
+                if response.status_code == 200:
+                    return response.json()
+        except Exception:
+            pass
+
+        return []
+
+    def get_all_users(self) -> List[Dict]:
+        """获取所有用户列表（管理员专用）。"""
+        url = f"{self.base_url}/api/users/"
+
+        try:
+            with httpx.Client() as client:
+                response = client.get(url, headers=self._get_headers(), follow_redirects=True)
+                if response.status_code == 200:
+                    return response.json()
+        except Exception:
+            pass
+
+        return []
+
+    def activate_user(self, user_id: int) -> bool:
+        """激活用户（管理员专用）。"""
+        url = f"{self.base_url}/api/admin/users/{user_id}/activate"
+
+        try:
+            with httpx.Client() as client:
+                response = client.post(url, headers=self._get_headers(), follow_redirects=True)
+                return response.status_code == 200
+        except Exception:
+            return False
+
+    def disable_user(self, user_id: int) -> bool:
+        """禁用用户（管理员专用）。"""
+        url = f"{self.base_url}/api/admin/users/{user_id}/disable"
+
+        try:
+            with httpx.Client() as client:
+                response = client.post(url, headers=self._get_headers(), follow_redirects=True)
+                return response.status_code == 200
+        except Exception:
+            return False
+
+    def enable_user(self, user_id: int) -> bool:
+        """启用用户（管理员专用）。"""
+        url = f"{self.base_url}/api/admin/users/{user_id}/enable"
+
+        try:
+            with httpx.Client() as client:
+                response = client.post(url, headers=self._get_headers(), follow_redirects=True)
+                return response.status_code == 200
+        except Exception:
+            return False
+
+    def set_admin(self, user_id: int, is_admin: bool) -> bool:
+        """设置管理员权限（管理员专用）。"""
+        url = f"{self.base_url}/api/admin/users/{user_id}/set-admin"
+        params = {"is_admin": str(is_admin).lower()}
+
+        try:
+            with httpx.Client() as client:
+                response = client.post(url, headers=self._get_headers(), params=params, follow_redirects=True)
+                return response.status_code == 200
+        except Exception:
+            return False
+
+    def is_admin_user(self) -> bool:
+        """检查当前用户是否为管理员。"""
+        if not self.current_user:
+            return False
+        # 检查用户数据中是否有 admin 角色
+        return self.current_user.role == 'admin'

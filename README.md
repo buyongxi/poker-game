@@ -5,20 +5,42 @@
 ## 技术栈
 
 - **后端**: Python 3.10+, FastAPI, SQLAlchemy (异步), SQLite
-- **前端**: Vue 3, TypeScript, Vite, Pinia, Element Plus
+- **Web 前端**: Vue 3, TypeScript, Vite, Pinia, Element Plus
+- **终端前端** ⚠️ **已废弃**: Python Rich, websocket-client, httpx（代码保留但不再维护，存在较多 bug，推荐使用 Web 前端）
 - **实时通信**: WebSocket
 - **认证**: JWT
 
 ## 功能特性
 
 ### 核心功能
+
 - 用户注册与审核系统
 - 房间创建/加入机制
 - 实时游戏状态同步
 - 断线重连支持（5 分钟超时）
 - 内置聊天功能
+- **终端界面支持** - 提供彩色终端游戏界面
+
+### 客户端选择
+
+本项目提供两种客户端：
+
+#### Web 客户端（推荐）
+
+- 图形化界面，支持鼠标操作
+- 完整的视觉效果和动画
+- 适合桌面浏览器访问
+
+#### 终端客户端 ⚠️ 已废弃
+
+- 代码保留但不再维护，存在较多未修复的 bug
+- 命令行界面，支持键盘操作
+- 轻量级，无需浏览器
+- 支持离线模式（本地机器人对战）
+- 适合远程服务器或终端爱好者
 
 ### 德州扑克游戏逻辑
+
 - **盲注系统**: 小盲注 10，大盲注 20（可配置）
 - **买入范围**: 最小买入=大盲注，最大买入=2000（100 倍大盲注）
 - **四轮下注**: 翻牌前（Preflop）、翻牌（Flop）、转牌（Turn）、河牌（River）
@@ -27,6 +49,7 @@
 - **牌型判定**: 皇家同花顺 → 同花顺 → 四条 → 葫芦 → 同花 → 顺子 → 三条 → 两对 → 一对 → 高牌
 
 ### 管理员功能
+
 - 用户审核（启用审核模式时）
 - 房间管理
 - 游戏监控
@@ -65,9 +88,9 @@ python run.py --admin-username admin --admin-password <YOUR_ADMIN_PASSWORD>
 python run.py --admin-username admin --admin-password <YOUR_ADMIN_PASSWORD> --action-timeout 60
 ```
 
-后端将在 http://localhost:8000 运行。
+后端将在 [http://localhost:8000](http://localhost:8000) 运行。
 
-### 前端设置
+### Web 前端设置
 
 ```bash
 cd frontend
@@ -82,7 +105,24 @@ cp .env.example .env.development
 npm run dev
 ```
 
-前端将在 http://localhost:5173 运行。
+前端将在 [http://localhost:5173](http://localhost:5173) 运行。
+
+### 终端前端设置 ⚠️ 已废弃
+
+> **注意**：终端前端模式已废弃，代码保留但不再维护，存在较多 bug。推荐使用 Web 前端。
+
+```bash
+cd terminal
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 运行（在线模式，需要后端服务）
+python main.py
+
+# 运行（离线模式，无需后端）
+python poker_terminal.py
+```
 
 ## 项目结构
 
@@ -107,42 +147,63 @@ npm run dev
 │   ├── requirements.txt      # Python 依赖
 │   └── run.py                # 启动脚本
 │
-└── frontend/
-    ├── src/
-    │   ├── api/              # API 调用封装
-    │   ├── components/       # Vue 组件
-    │   ├── router/           # Vue Router 路由配置
-    │   ├── stores/           # Pinia 状态管理
-    │   │   ├── auth.ts       # 认证状态
-    │   │   ├── game.ts       # 游戏状态
-    │   │   └── room.ts       # 房间状态
-    │   ├── types/            # TypeScript 类型定义
-    │   └── views/            # 页面视图 (Login, Lobby, Room, Admin)
-    ├── .env.example          # 前端环境变量示例
-    ├── package.json
-    └── vite.config.ts        # Vite 构建配置
+├── frontend/
+│   ├── src/
+│   │   ├── api/              # API 调用封装
+│   │   ├── components/       # Vue 组件
+│   │   ├── router/           # Vue Router 路由配置
+│   │   ├── stores/           # Pinia 状态管理
+│   │   │   ├── auth.ts       # 认证状态
+│   │   │   ├── game.ts       # 游戏状态
+│   │   │   └── room.ts       # 房间状态
+│   │   ├── types/            # TypeScript 类型定义
+│   │   └── views/            # 页面视图 (Login, Lobby, Room, Admin)
+│   ├── .env.example          # 前端环境变量示例
+│   ├── package.json
+│   └── vite.config.ts        # Vite 构建配置
+│
+└── terminal/
+    ├── ui/
+    │   ├── __init__.py       # UI 模块初始化
+    │   ├── display.py        # 终端显示模块
+    │   ├── input.py          # 用户输入处理
+    │   └── auth.py           # 认证界面
+    ├── api_client.py         # REST API 客户端
+    ├── websocket_client.py   # WebSocket 客户端
+    ├── online_client.py      # 在线游戏客户端
+    ├── poker_terminal.py     # 离线游戏客户端
+    ├── lobby.py              # 游戏大厅模块
+    ├── main.py               # 主入口（在线模式）
+    ├── requirements.txt      # Python 依赖
+    └── README.md             # 终端前端文档
 ```
 
 ## 游戏规则
 
 ### 盲注结构
+
 - 小盲注（SB）：10
 - 大盲注（BB）：20
 
 ### 买入规则
+
 - 最小买入：大盲注金额（20）
 - 最大买入：2000（100 倍大盲注）
 
 ### 玩家操作
-| 操作 | 说明 |
-|------|------|
-| Fold（弃牌） | 放弃本局，失去已下注筹码 |
-| Check（过牌） | 不加注，保持当前下注（仅当无人加注时可用） |
-| Call（跟注） | 匹配当前最高下注 |
-| Raise（加注） | 增加下注金额，最小加注为大盲注的 2 倍 |
-| All-in（全押） | 押上所有筹码 |
+
+
+| 操作         | 说明                    |
+| ---------- | --------------------- |
+| Fold（弃牌）   | 放弃本局，失去已下注筹码          |
+| Check（过牌）  | 不加注，保持当前下注（仅当无人加注时可用） |
+| Call（跟注）   | 匹配当前最高下注              |
+| Raise（加注）  | 增加下注金额，最小加注为大盲注的 2 倍  |
+| All-in（全押） | 押上所有筹码                |
+
 
 ### 牌型排名（从高到低）
+
 1. **皇家同花顺** (Royal Flush): A K Q J 10 同花顺
 2. **同花顺** (Straight Flush): 五张连续同花色牌
 3. **四条** (Four of a Kind): 四张同点数牌
@@ -155,6 +216,7 @@ npm run dev
 10. **高牌** (High Card): 无以上牌型，比最大牌
 
 ### 游戏流程
+
 1. **准备阶段**: 玩家加入房间 → 准备就绪
 2. **开始游戏**: 房主开始游戏 → 分配座位
 3. **盲注**: 小盲注 → 大盲注
@@ -207,28 +269,40 @@ VITE_API_BASE_URL=http://localhost:8000
 VITE_WS_BASE_URL=ws://localhost:8000
 ```
 
+### 终端前端配置 ⚠️ 已废弃
+
+> **注意**：终端前端模式已废弃，代码保留但不再维护。
+
+终端前端无需额外配置，默认连接 `http://localhost:8000`。
+
+如需修改后端地址，可编辑 `terminal/main.py` 中的 `SyncAPIClient` 初始化参数。
+
 ### 启动参数
 
 ```bash
 python run.py --admin-username admin --admin-password <PASSWORD> --action-timeout 60
 ```
 
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--admin-username` | 初始管理员用户名 | - |
-| `--admin-password` | 初始管理员密码 | - |
+
+| 参数                     | 说明        | 默认值 |
+| ---------------------- | --------- | --- |
+| `--admin-username`     | 初始管理员用户名  | -   |
+| `--admin-password`     | 初始管理员密码   | -   |
 | `--admin-display-name` | 初始管理员显示名称 | 管理员 |
-| `--action-timeout` | 玩家操作超时（秒） | 30 |
+| `--action-timeout`     | 玩家操作超时（秒） | 30  |
+
 
 ## API 文档
 
 启动后端后访问：
-- **Swagger UI**: http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
 
 ## WebSocket 通信
 
 ### 连接
+
 ```
 ws://localhost:8000/ws/room/{roomId}?token={jwt_token}
 ```
@@ -236,30 +310,36 @@ ws://localhost:8000/ws/room/{roomId}?token={jwt_token}
 ### 消息类型
 
 #### 客户端 → 服务端
-| 类型 | 说明 |
-|------|------|
-| `ready` | 准备就绪 |
-| `unready` | 取消准备 |
-| `start_game` | 开始游戏（房主） |
-| `stop_game` | 停止游戏（房主） |
-| `action` | 玩家操作（fold/check/call/raise/all_in） |
-| `chat` | 发送聊天消息 |
+
+
+| 类型           | 说明                                 |
+| ------------ | ---------------------------------- |
+| `ready`      | 准备就绪                               |
+| `unready`    | 取消准备                               |
+| `start_game` | 开始游戏（房主）                           |
+| `stop_game`  | 停止游戏（房主）                           |
+| `action`     | 玩家操作（fold/check/call/raise/all_in） |
+| `chat`       | 发送聊天消息                             |
+
 
 #### 服务端 → 客户端
-| 类型 | 说明 |
-|------|------|
-| `game_state` | 游戏状态更新 |
-| `room_state` | 房间状态更新 |
-| `chat` | 聊天消息 |
-| `user_joined` | 用户加入 |
+
+
+| 类型                  | 说明     |
+| ------------------- | ------ |
+| `game_state`        | 游戏状态更新 |
+| `room_state`        | 房间状态更新 |
+| `chat`              | 聊天消息   |
+| `user_joined`       | 用户加入   |
 | `user_disconnected` | 用户断开连接 |
-| `user_left` | 用户离开 |
-| `owner_changed` | 房主变更 |
-| `room_deleted` | 房间已删除 |
-| `hand_complete` | 一局结束结果 |
-| `game_ended` | 游戏结束 |
-| `info` | 提示信息 |
-| `error` | 错误信息 |
+| `user_left`         | 用户离开   |
+| `owner_changed`     | 房主变更   |
+| `room_deleted`      | 房间已删除  |
+| `hand_complete`     | 一局结束结果 |
+| `game_ended`        | 游戏结束   |
+| `info`              | 提示信息   |
+| `error`             | 错误信息   |
+
 
 ## 开发说明
 
@@ -285,6 +365,11 @@ python -m compileall app
 # 前端
 cd frontend
 npm ci && npm run build
+
+# 终端前端
+cd terminal
+pip install -r requirements.txt
+python test_features.py  # 运行功能测试
 ```
 
 ## 限制说明
@@ -295,10 +380,37 @@ npm ci && npm run build
 - 会话超时：30 分钟无活动
 - 登录锁定：15 分钟（5 次失败尝试后）
 
+## 客户端对比
+
+
+| 特性   | Web 客户端（推荐） | 终端客户端 ⚠️ 已废弃  |
+| ---- | --------- | ------------ |
+| 界面类型 | 图形化 (GUI) | 命令行 (CLI)    |
+| 操作方式 | 鼠标 + 键盘   | 键盘           |
+| 依赖   | 浏览器       | Python 运行时   |
+| 在线模式 | ✅         | ✅            |
+| 离线模式 | ❌         | ✅ (带机器人)     |
+| 聊天功能 | ✅         | ✅            |
+| 实时状态 | ✅         | ✅            |
+| 视觉效果 | 丰富        | 简洁（彩色文本）     |
+| 适用场景 | 桌面浏览器     | 终端/SSH/远程服务器 |
+| 维护状态 | ✅ 持续维护   | ❌ 已废弃，bug 较多 |
+
+
 ## 许可证
 
 MIT License
 
+## 相关文档
+
+- [QUICK_REFERENCE.md](QUICK_REFERENCE.md) - 项目快速参考
+- [CONTRIBUTING.md](CONTRIBUTING.md) - 贡献指南
+- [CLAUDE.md](CLAUDE.md) - Claude Code 开发指南
+- [terminal/README.md](terminal/README.md) - 终端前端详细文档
+- [terminal/QUICKSTART.md](terminal/QUICKSTART.md) - 终端前端快速参考
+- [terminal/SUMMARY.md](terminal/SUMMARY.md) - 终端前端功能总结
+
 ## 联系方式
 
-- 邮箱：buyongxi@foxmail.com
+- 邮箱：[buyongxi@foxmail.com](mailto:buyongxi@foxmail.com)
+

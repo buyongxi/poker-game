@@ -8,7 +8,7 @@ from rich.panel import Panel
 from rich.text import Text
 from typing import Optional, Tuple
 
-from ..api_client import SyncAPIClient, User, LoginResult, RegisterResult
+from api_client import SyncAPIClient, User, LoginResult, RegisterResult
 
 
 console = Console()
@@ -48,7 +48,7 @@ class AuthManager:
             elif choice == "q":
                 return None
 
-    def _show_auth_menu() -> str:
+    def _show_auth_menu(self) -> str:
         """显示认证菜单。"""
         console.clear()
 
@@ -56,7 +56,7 @@ class AuthManager:
         text.append("\n", style="default")
         text.append("╔═══════════════════════════════════════════════════════════╗\n", style="bold magenta")
         text.append("║                                                           ║\n", style="magenta")
-        text.append("║            🃏  德州扑克终端版  🃏                          ║\n", style="bold yellow")
+        text.append("║                       德州扑克终端版                       ║\n", style="bold yellow")
         text.append("║                                                           ║\n", style="magenta")
         text.append("╚═══════════════════════════════════════════════════════════╝\n", style="bold magenta")
         text.append("\n", style="default")
@@ -88,9 +88,13 @@ class AuthManager:
 
         result = self.api_client.login(username, password)
 
-        if result.success:
+        if result.success and result.user:
             console.print(f"\n[green]✓ 登录成功！欢迎 {result.user.display_name}[/green]\n")
             self.current_user = result.user
+        elif result.success and not result.user:
+            # 登录成功但获取用户信息失败
+            console.print(f"\n[red]✗ 登录成功但获取用户信息失败[/red]\n")
+            return LoginResult(success=False, error="获取用户信息失败")
         else:
             console.print(f"\n[red]✗ 登录失败：{result.error}[/red]\n")
 

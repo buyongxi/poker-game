@@ -19,12 +19,18 @@ from app.game.player import Player, PlayerStatus
 from app.game.deck import Card
 
 from ui.display import TerminalDisplay, CardDisplay
-from ui.input import (
-    get_player_action,
-    prompt_rebuy,
-)
+from ui.input import get_player_action
 from websocket_client import WebSocketClient, ChatMessage
 from api_client import SyncAPIClient, User
+
+from rich.prompt import Prompt, Confirm
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich.box import ROUNDED
+
+console = Console()
 
 
 class OnlinePokerClient:
@@ -36,6 +42,11 @@ class OnlinePokerClient:
     - 聊天功能
     - 准备/取消准备
     - 游戏操作
+
+    显示区域划分：
+    - 顶部：房间信息（房间名、盲注、买入）
+    - 中间：玩家座位列表 / 游戏牌桌
+    - 底部：操作按钮 / 聊天消息
     """
 
     def __init__(self, api_client: SyncAPIClient, user: User, room: Dict):
@@ -58,10 +69,18 @@ class OnlinePokerClient:
         self.game_state: Optional[Dict] = None
         self.room_state: Optional[Dict] = None
 
+        # 准备状态
+        self.is_ready = False
+        self.is_owner = False
+        self.my_seat_index: Optional[int] = None
+
         # 倒计时
         self._countdown_thread: Optional[threading.Thread] = None
         self._remaining_time: Optional[int] = None
         self._stop_countdown = threading.Event()
+
+        # 清屏标记
+        self._cleared_for_game = False
 
     def connect(self) -> bool:
         """连接到 WebSocket 服务。"""
@@ -102,22 +121,21 @@ class OnlinePokerClient:
         if not self.connect():
             return
 
-        # 显示欢迎界面
+        # 清屏并显示欢迎界面
+        console.clear()
         self._show_welcome()
 
-        # 等待游戏状态
-        self.display.display_message("等待游戏开始...", title="信息", style="cyan")
-
-        # 主循环
+        # 主循环 - 等待房间状态
         try:
             while self._running and self._connected:
-                # 检查是否轮到自己行动
-                if self._my_turn and self.game_state:
-                    self._handle_my_turn()
-                else:
-                    # 等待其他玩家
-                    self._render_waiting_state()
-                    time.sleep(0.5)
+                # 等待房间状态
+                if self.room_state:
+                    self._update_room_info()
+                    break
+                time.sleep(0.1)
+
+            # 进入房间主循环
+            self._room_loop()
 
         except KeyboardInterrupt:
             self._running = False
@@ -126,14 +144,69 @@ class OnlinePokerClient:
         finally:
             self.disconnect()
 
+    def _room_loop(self):
+        """房间主循环 - 处理准备阶段和游戏阶段。"""
+        while self._running and self._connected:
+            # 检查游戏是否激活
+            if self.game_state and self.game_state.get("is_active"):
+                # 游戏阶段
+                if not self._cleared_for_game:
+                    console.clear()
+                    self._cleared_for_game = True
+                self._game_loop()
+            else:
+                # 准备阶段
+                self._cleared_for_game = False
+                self._pregame_loop()
+
+            time.sleep(0.2)
+
+    def _pregame_loop(self):
+        """准备阶段循环 - 显示房间信息，等待玩家准备。"""
+        # 首次显示准备界面
+        self._render_pregame_state()
+        last_ready_count = -1
+
+        while self._running and self._connected:
+            # 检查是否进入游戏阶段
+            if self.game_state and self.game_state.get("is_active"):
+                return
+
+            # 检查是否需要刷新（已准备人数变化）
+            if self.room_state:
+                ready_count = sum(1 for s in self.room_state.get("seats", []) if s.get("status") == "ready")
+                if ready_count != last_ready_count:
+                    self._render_pregame_state()
+                    last_ready_count = ready_count
+
+            # 处理输入（非阻塞）
+            self._handle_pregame_input()
+
+            time.sleep(0.3)
+
+    def _game_loop(self):
+        """游戏阶段循环 - 处理游戏操作。"""
+        while self._running and self._connected:
+            # 检查游戏是否结束
+            if not self.game_state or not self.game_state.get("is_active"):
+                return
+
+            # 检查是否轮到自己行动
+            if self._my_turn and self.game_state:
+                self._handle_my_turn()
+            else:
+                # 等待其他玩家
+                self._render_waiting_state()
+                time.sleep(0.5)
+
     def _on_connect(self):
-        """WebSocket 连接建立。"""
+        """WebSocket 连接已建立。"""
         print("[OnlineClient] WebSocket 连接已建立")
         self._connected = True
         self.display.add_chat_message("已连接到游戏服务器", is_system=True)
 
     def _on_disconnect(self):
-        """WebSocket 连接断开。"""
+        """WebSocket 连接已断开。"""
         print("[OnlineClient] WebSocket 连接已断开")
         self._connected = False
         self._running = False
@@ -163,6 +236,16 @@ class OnlinePokerClient:
         print(f"[OnlineClient] 房间状态更新")
         self.room_state = state
 
+        # 更新房主状态
+        self.is_owner = (state.get("owner_id") == self.user.id)
+
+        # 更新座位信息
+        seats = state.get("seats", [])
+        for seat in seats:
+            if seat.get("user_id") == self.user.id:
+                self.my_seat_index = seat.get("seat_index")
+                break
+
     def _on_chat(self, message: ChatMessage):
         """聊天消息回调。"""
         if message.is_system:
@@ -181,8 +264,6 @@ class OnlinePokerClient:
 
     def _show_welcome(self):
         """显示欢迎界面。"""
-        self.display.clear()
-
         lines = []
         lines.append("[bold magenta]╔═══════════════════════════════════════════════════════════╗[/bold magenta]")
         lines.append("[bold magenta]║[/bold magenta]                  [bold]欢迎加入房间[/bold]                          [bold magenta]║[/bold magenta]")
@@ -196,7 +277,293 @@ class OnlinePokerClient:
         lines.append("[dim]输入 'ready' 准备，'chat <消息>' 发送聊天，'quit' 离开[/dim]")
 
         for line in lines:
-            self.display.console.print(line)
+            console.print(line)
+
+    def _update_room_info(self):
+        """更新房间信息（房主、座位等）。"""
+        if self.room_state:
+            self.is_owner = (self.room_state.get("owner_id") == self.user.id)
+
+    def _render_pregame_state(self):
+        """渲染准备阶段界面。"""
+        console.clear()
+
+        # 顶部：房间信息
+        self._render_room_header()
+
+        # 中间：玩家座位列表
+        self._render_seat_list()
+
+        # 底部：操作按钮和聊天
+        self._render_pregame_actions()
+
+        # 聊天消息
+        self._display_chat()
+
+    def _render_room_header(self):
+        """渲染房间信息头部。"""
+        lines = []
+        lines.append("[bold cyan]╔═══════════════════════════════════════════════════════════╗[/bold cyan]")
+        lines.append("[bold cyan]║[/bold cyan]                  [bold]游戏房间[/bold]                              [bold cyan]║[/bold cyan]")
+        lines.append("[bold cyan]╚═══════════════════════════════════════════════════════════╝[/bold cyan]")
+        lines.append("")
+        lines.append(f"[bold]房间名称:[/bold] [yellow]{self.room.get('name', 'Unknown')}[/yellow]")
+        lines.append(f"[bold]盲注:[/bold] [green]{self.room.get('small_blind', 10)}/{self.room.get('big_blind', 20)}[/green]")
+        lines.append(f"[bold]最大买入:[/bold] [cyan]{self.room.get('max_buyin', 2000)}[/cyan]")
+        lines.append(f"[bold]状态:[/bold] {'[green]等待中[/green]' if self.room.get('status') == 'waiting' else '[yellow]游戏中[/yellow]'}")
+
+        for line in lines:
+            console.print(line)
+        console.print()
+
+    def _render_seat_list(self):
+        """渲染玩家座位列表。"""
+        if not self.room_state:
+            return
+
+        seats = self.room_state.get("seats", [])
+        if not seats:
+            console.print("[dim]暂无玩家[/dim]\n")
+            return
+
+        table = Table(title="玩家座位", box=ROUNDED, expand=True)
+        table.add_column("座位", style="dim", width=6, justify="center")
+        table.add_column("玩家", style="bold", width=15)
+        table.add_column("筹码", style="green", width=10, justify="right")
+        table.add_column("净筹码", width=10, justify="right")
+        table.add_column("状态", width=12, justify="center")
+
+        for seat in seats:
+            seat_index = seat.get("seat_index", -1)
+            user_id = seat.get("user_id")
+            user_name = seat.get("user_name", "空位")
+            chips = seat.get("chips", 0)
+            net_chips = seat.get("net_chips", 0)
+            status = seat.get("status", "empty")
+
+            # 座位号
+            seat_str = f"{seat_index + 1}" if seat_index >= 0 else "-"
+
+            # 玩家名
+            if status == "empty":
+                name_str = "[dim]空位[/dim]"
+            else:
+                name_str = user_name
+                if user_id == self.user.id:
+                    name_str = f"[yellow]→{user_name} (你)[/yellow]"
+                elif user_id == self.room_state.get("owner_id"):
+                    name_str = f"[magenta]👑 {user_name}[/magenta]"
+
+            # 筹码
+            chips_str = f"[green]${chips}[/green]"
+
+            # 净筹码
+            net_style = "green" if net_chips >= 0 else "red"
+            net_sign = "+" if net_chips >= 0 else ""
+            net_str = f"[{net_style}]{net_sign}${net_chips}[/{net_style}]"
+
+            # 状态
+            status_map = {
+                "empty": ("[dim]空位[/dim]", "○"),
+                "waiting": ("[dim]等待中[/dim]", "○"),
+                "ready": ("[green]已准备[/green]", "●"),
+                "playing": ("[yellow]游戏中[/yellow]", "●"),
+                "folded": ("[dim]已弃牌[/dim]", "×"),
+                "all_in": ("[bold red]ALL-IN[/bold red]", "★"),
+                "disconnected": ("[red]已断线[/red]", "○"),
+            }
+            status_text, status_icon = status_map.get(status, ("未知", "○"))
+
+            table.add_row(seat_str, name_str, chips_str, net_str, f"{status_icon} {status_text}")
+
+        console.print(table)
+        console.print()
+
+    def _render_pregame_actions(self):
+        """渲染准备阶段操作按钮。"""
+        if not self.room_state:
+            return
+
+        # 找到自己的座位
+        my_seat = None
+        seats = self.room_state.get("seats", [])
+        for seat in seats:
+            if seat.get("user_id") == self.user.id:
+                my_seat = seat
+                break
+
+        if not my_seat:
+            console.print("[yellow]你还未入座，请选择座位加入[/yellow]\n")
+            return
+
+        # 显示我的座位信息
+        lines = []
+        lines.append("[bold cyan]─────────────────────────────────────────────────────[/bold cyan]")
+        lines.append(f"[bold]我的座位:[/bold] 第 {my_seat.get('seat_index', 0) + 1} 号座")
+        lines.append(f"[bold]我的筹码:[/bold] [green]${my_seat.get('chips', 0)}[/green]")
+        net_chips = my_seat.get("net_chips", 0)
+        net_style = "green" if net_chips >= 0 else "red"
+        net_sign = "+" if net_chips >= 0 else ""
+        lines.append(f"[bold]净筹码:[/bold] [{net_style}]{net_sign}${net_chips}[/{net_style}]")
+        lines.append(f"[bold]状态:[/bold] {'[green]已准备[/green]' if my_seat.get('status') == 'ready' else '[dim]未准备[/dim]'}")
+        lines.append("")
+
+        # 操作按钮
+        ready_count = sum(1 for s in seats if s.get("status") == "ready")
+        player_count = sum(1 for s in seats if s.get("status") != "empty")
+        lines.append(f"[bold]已准备:[/bold] {ready_count} / {player_count} 玩家")
+        lines.append("")
+
+        # 按钮提示
+        if my_seat.get("chips", 0) == 0:
+            lines.append("[yellow]⚠ 你的筹码已用完，请补充筹码[/yellow]")
+            lines.append("  输入 'rebuy <数量>' 补充筹码")
+
+        if my_seat.get("status") == "ready":
+            lines.append("  输入 [bold]'unready'[/bold] 取消准备")
+        else:
+            lines.append("  输入 [bold]'ready'[/bold] 准备")
+
+        if self.is_owner and ready_count >= 2:
+            lines.append("  输入 [bold]'start'[/bold] 开始游戏 [green](房主专属)[/green]")
+        elif self.is_owner:
+            lines.append("[dim]  至少需要 2 名玩家准备才能开始游戏[/dim]")
+
+        lines.append("  输入 [bold]'chat <消息>'[/bold] 发送聊天")
+        lines.append("  输入 [bold]'quit'[/bold] 离开房间")
+        lines.append("")
+
+        for line in lines:
+            console.print(line)
+
+    def _handle_pregame_input(self):
+        """处理准备阶段输入。"""
+        # 获取自己的座位
+        my_seat = None
+        if self.room_state:
+            seats = self.room_state.get("seats", [])
+            for seat in seats:
+                if seat.get("user_id") == self.user.id:
+                    my_seat = seat
+                    break
+
+        if not my_seat:
+            console.print("[yellow]你还未入座，请选择座位加入[/yellow]\n")
+            return
+
+        # 显示提示（不清屏）
+        choice = Prompt.ask(
+            "[bold cyan]请输入命令[/bold cyan] (ready/unready/start/chat/rebuy/quit/h)",
+            default=""
+        ).strip().lower()
+
+        if not choice:
+            return
+
+        # 处理命令
+        if choice == "ready":
+            if my_seat.get("status") != "ready":
+                self.send_ready()
+                self._render_pregame_state()  # 刷新界面
+            else:
+                console.print("[yellow]你已准备[/yellow]\n")
+
+        elif choice == "unready":
+            if my_seat.get("status") == "ready":
+                self.send_unready()
+                self._render_pregame_state()  # 刷新界面
+            else:
+                console.print("[yellow]你还未准备[/yellow]\n")
+
+        elif choice == "start":
+            if self.is_owner:
+                ready_count = sum(1 for s in self.room_state.get("seats", []) if s.get("status") == "ready")
+                if ready_count >= 2:
+                    if self.ws_client:
+                        self.ws_client.send_start_game()
+                        # 游戏开始后由游戏状态触发刷新
+                else:
+                    console.print("[yellow]至少需要 2 名玩家准备才能开始游戏[/yellow]\n")
+            else:
+                console.print("[yellow]只有房主可以开始游戏[/yellow]\n")
+
+        elif choice.startswith("chat "):
+            message = choice[5:].strip()
+            if message:
+                self.send_chat(message)
+                # 聊天消息会自动显示在聊天区域
+
+        elif choice.startswith("rebuy"):
+            parts = choice.split()
+            if len(parts) > 1:
+                try:
+                    amount = int(parts[1])
+                    if my_seat.get("chips", 0) == 0:
+                        # 调用 API 补充筹码
+                        result = self.api_client.rebuy_chips(self.room_id, amount)
+                        if result:
+                            console.print(f"[green]补充筹码成功：${amount}[/green]\n")
+                            self._render_pregame_state()  # 刷新界面
+                        else:
+                            console.print("[red]补充筹码失败[/red]\n")
+                    else:
+                        console.print("[yellow]只有筹码为 0 时才能补充[/yellow]\n")
+                except ValueError:
+                    console.print("[yellow]无效的筹码数量[/yellow]\n")
+            else:
+                console.print(f"[yellow]请输入补充筹码数量，例如：rebuy {self.room.get('max_buyin', 2000)}[/yellow]\n")
+
+        elif choice == "quit" or choice == "q":
+            # 离开房间
+            if Confirm.ask("[bold]确定要离开房间吗？[/bold]"):
+                self.api_client.leave_room(self.room_id)
+                self._running = False
+
+        elif choice == "help" or choice == "h":
+            self._show_help()
+
+        else:
+            console.print(f"[yellow]未知命令：{choice}[/yellow]\n")
+            self._show_help()
+
+    def _show_help(self):
+        """显示帮助信息。"""
+        console.print("\n[bold cyan]可用命令:[/bold cyan]")
+        console.print("  [bold]ready[/bold]     - 准备")
+        console.print("  [bold]unready[/bold]   - 取消准备")
+        console.print("  [bold]start[/bold]     - 开始游戏 (房主)")
+        console.print("  [bold]chat <消息>[/bold] - 发送聊天")
+        console.print("  [bold]rebuy <数量>[/bold] - 补充筹码 (筹码为 0 时)")
+        console.print("  [bold]quit[/bold]    - 离开房间")
+        console.print("  [bold]help[/bold]    - 显示帮助\n")
+
+    def _render_waiting_state(self):
+        """渲染等待状态。"""
+        # 构建临时的游戏状态用于显示
+        temp_game = self._create_temp_game_from_state()
+
+        if temp_game:
+            self.display.update_live(temp_game, None, "等待其他玩家行动...")
+        else:
+            console.print("\n[dim]等待其他玩家行动...[/dim]")
+
+        # 显示聊天消息
+        self._display_chat()
+
+    def _render_game_state(self):
+        """渲染游戏状态。"""
+        temp_game = self._create_temp_game_from_state()
+
+        if temp_game:
+            current_player_id = self.game_state.get("current_player_id") if self.game_state else None
+            self.display.update_live(temp_game, current_player_id)
+        else:
+            console.print("\n[dim]等待游戏数据...[/dim]")
+
+    def _create_temp_game_from_state(self) -> Optional[GameEngine]:
+        """从 WebSocket 游戏状态创建临时的 GameEngine 对象用于显示。"""
+        # 简化实现：返回 None 表示使用简化的显示模式
+        return None
 
     def _handle_my_turn(self):
         """处理自己的行动回合。"""
@@ -221,59 +588,26 @@ class OnlinePokerClient:
 
     def _get_human_action(self) -> Optional[Dict]:
         """获取人类玩家的操作。"""
-        # 这里需要从游戏状态中获取可用操作
-        # 由于是在线模式，我们需要解析游戏状态来构建操作菜单
-
         if not self.game_state:
             return None
 
         # 简化处理：显示操作提示，等待用户输入
-        self.display.console.print("\n[bold yellow]轮到你行动！[/bold yellow]")
-        self.display.console.print("[1] 弃牌  [2] 过牌  [3] 跟注  [4] 加注  [5] 全押")
+        console.print("\n[bold yellow]轮到你行动！[/bold yellow]")
+        console.print("[1] 弃牌  [2] 过牌  [3] 跟注  [4] 加注  [5] 全押")
 
-        # 这里应该使用更复杂的输入处理
         # 简化版本：直接返回一个默认操作
         return {"action": "check", "amount": 0}
-
-    def _render_waiting_state(self):
-        """渲染等待状态。"""
-        # 构建临时的游戏状态用于显示
-        temp_game = self._create_temp_game_from_state()
-
-        if temp_game:
-            self.display.update_live(temp_game, None, "等待其他玩家行动...")
-        else:
-            self.display.console.print("\n[dim]等待游戏开始...[/dim]")
-
-        # 显示聊天消息
-        self._display_chat()
-
-    def _render_game_state(self):
-        """渲染游戏状态。"""
-        temp_game = self._create_temp_game_from_state()
-
-        if temp_game:
-            current_player_id = self.game_state.get("current_player_id") if self.game_state else None
-            self.display.update_live(temp_game, current_player_id)
-        else:
-            self.display.console.print("\n[dim]等待游戏数据...[/dim]")
-
-    def _create_temp_game_from_state(self) -> Optional[GameEngine]:
-        """从 WebSocket 游戏状态创建临时的 GameEngine 对象用于显示。"""
-        # 这是一个简化实现，实际可能需要更复杂的转换
-        # 这里返回 None 表示使用简化的显示模式
-        return None
 
     def _display_chat(self):
         """显示聊天消息。"""
         messages = self.ws_client.get_chat_messages() if self.ws_client else []
         if messages:
-            self.display.console.print("\n[bold cyan]聊天:[/bold cyan]")
+            console.print("\n[bold cyan]聊天:[/bold cyan]")
             for msg in messages[-5:]:
                 if msg.is_system:
-                    self.display.console.print(f"  [dim][系统] {msg.message}[/dim]")
+                    console.print(f"  [dim][系统] {msg.message}[/dim]")
                 else:
-                    self.display.console.print(f"  {msg.username}: {msg.message}")
+                    console.print(f"  {msg.username}: {msg.message}")
 
     def _start_countdown(self):
         """启动倒计时线程。"""
@@ -298,12 +632,14 @@ class OnlinePokerClient:
         """发送准备信号。"""
         if self.ws_client and self._connected:
             self.ws_client.send_ready()
+            self.is_ready = True
             self.display.add_chat_message("已准备", is_system=True)
 
     def send_unready(self):
         """发送取消准备信号。"""
         if self.ws_client and self._connected:
             self.ws_client.send_unready()
+            self.is_ready = False
             self.display.add_chat_message("已取消准备", is_system=True)
 
     def send_chat(self, message: str):

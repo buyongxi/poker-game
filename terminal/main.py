@@ -14,14 +14,19 @@ import sys
 import os
 import time
 
+from rich.console import Console
+
 # 添加路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 
 from api_client import SyncAPIClient, User
 from ui.auth import AuthManager, display_login_success, display_auth_error
+from ui.admin import AdminManager, show_admin_entry
 from lobby import LobbyManager
 from poker_terminal import TerminalPokerClient
 from online_client import OnlinePokerClient
+
+console = Console()
 
 
 def main():
@@ -40,6 +45,10 @@ def main():
     # 显示登录成功
     display_login_success(user)
 
+    # 检查是否为管理员，显示管理员入口提示
+    if user.role == 'admin':
+        show_admin_entry()
+
     # 检查是否为离线模式
     if user.id == 0:
         # 离线模式 - 直接启动本地游戏
@@ -56,6 +65,9 @@ def main():
         print("\n[yellow]已返回主菜单[/yellow]\n")
         return
 
+    # 清屏后进入游戏
+    console.clear()
+
     # 启动游戏
     print(f"\n[green]正在进入游戏：{room['name']}...[/green]\n")
     time.sleep(1)
@@ -63,6 +75,9 @@ def main():
     # 在线模式 - 使用 WebSocket 连接
     client = OnlinePokerClient(api_client, user, room)
     client.run()
+
+    # 游戏退出后清屏，返回大厅
+    console.clear()
 
 
 if __name__ == "__main__":
