@@ -546,11 +546,18 @@ async def broadcast_game_state(room_id: int):
         current_phase = game.phase.value if hasattr(game.phase, 'value') else str(game.phase)
         last_phase = manager.last_known_phase.get(room_id)
 
-        # Detect if we just dealt new cards (phase changed from preflop->flop, flop->turn, turn->river)
-        dealing_phases = {GamePhase.FLOP.value, GamePhase.TURN.value, GamePhase.RIVER.value}
+        # Detect if we just dealt new cards
+        # Cases: ENDED/SHOWDOWN -> PREFLOP (new hand), PREFLOP -> FLOP, FLOP -> TURN, TURN -> RIVER
+        dealing_transitions = {
+            (None, GamePhase.PREFLOP.value),  # First hand or game restarted
+            (GamePhase.ENDED.value, GamePhase.PREFLOP.value),  # New hand after previous ended
+            (GamePhase.SHOWDOWN.value, GamePhase.PREFLOP.value),  # New hand after showdown
+            (GamePhase.PREFLOP.value, GamePhase.FLOP.value),
+            (GamePhase.FLOP.value, GamePhase.TURN.value),
+            (GamePhase.TURN.value, GamePhase.RIVER.value),
+        }
         just_dealt = (last_phase != current_phase and
-                      last_phase is not None and
-                      current_phase in dealing_phases)
+                      (last_phase, current_phase) in dealing_transitions)
 
         # Update last known phase
         manager.last_known_phase[room_id] = current_phase
