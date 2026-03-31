@@ -41,6 +41,8 @@ class ConnectionManager:
         self.action_start_times: Dict[int, float] = {}
         # room_id -> last known phase (for detecting dealing)
         self.last_known_phase: Dict[int, str] = {}
+        # room_id -> True (waiting for next hand to start after HAND_END_DELAY)
+        self.waiting_for_next_hand: Dict[int, bool] = {}
         # Cleanup task for disconnect timeouts
         self.cleanup_task: Optional[asyncio.Task] = None
         self._start_cleanup_task()
@@ -215,6 +217,8 @@ class ConnectionManager:
             del self.last_known_phase[room_id]
         if room_id in self.game_stop_requested:
             del self.game_stop_requested[room_id]
+        if room_id in self.waiting_for_next_hand:
+            del self.waiting_for_next_hand[room_id]
 
         # Clean up disconnect times for users in this room
         users_to_remove = [uid for uid, rid in self.user_room.items() if rid == room_id]
@@ -391,6 +395,14 @@ async def handle_message(
             await websocket.send_json({
                 "type": "error",
                 "data": {"message": "只有房主可以开始游戏"}
+            })
+            return
+
+        # Check if waiting for next hand (after HAND_END_DELAY)
+        if manager.waiting_for_next_hand.get(room_id, False):
+            await websocket.send_json({
+                "type": "error",
+                "data": {"message": "正在等待开始下一局，请稍候"}
             })
             return
 
@@ -1004,5 +1016,17 @@ async def handle_hand_end(room_id: int):
     game_should_continue = await _handle_stop_requests(game, room_id, room, room_service, previous_hand_players)
 
     if game_should_continue:
-        # Prepare and start next hand
-        await _prepare_and_start_next_hand(game, room_id, room, room_service, previous_hand_players)
+        # Set flag to prevent duplicate game start requests during delay
+        manager.waiting_for_next_hand[room_id] = True
+
+        try:
+            # Wait for hand end delay before preparing next hand
+            # This gives players time to see the results before next hand starts
+            await asyncio.sleep(settings.HAND_END_DELAY)
+
+            # Prepare and start next hand
+            await _prepare_and_start_next_hand(game, room_id, room, room_service, previous_hand_players)
+        finally:
+            # Clear flag after delay completes or fails
+            if room_id in manager.waiting_for_next_hand:
+                del manager.waiting_for_next_hand[room_id]
