@@ -55,6 +55,7 @@ class GameEngine:
         self.small_blind = small_blind
         self.big_blind = big_blind
         self.action_timeout = action_timeout or settings.ACTION_TIMEOUT
+        self.dealing_delay = settings.DEALING_DELAY  # 发牌后等待时间
 
         # Game state
         self.phase = GamePhase.ENDED
@@ -243,7 +244,7 @@ class GameEngine:
         # No player can act (all ALL_IN) - check if round complete and advance
         self.current_player_index = self._next_active_player(self.bb_index)
         if self._is_betting_round_complete():
-            self._advance_phase()
+            self._advance_phase()  # Return value ignored - preflop all-in runs out community cards
 
     def get_current_player(self) -> Optional[Player]:
         """Get the player whose turn it is."""
@@ -429,8 +430,12 @@ class GameEngine:
         # No more players can act
         self._advance_phase()
 
-    def _advance_phase(self) -> None:
-        """Advance to next game phase."""
+    def _advance_phase(self) -> bool:
+        """
+        Advance to next game phase.
+        Returns True if there's a player who needs to act (delay should be applied),
+        False if no player action needed (all-in situation or immediate showdown).
+        """
         # Reset betting for new round
         self.pot_manager.new_betting_round()
         self.current_bet = 0
@@ -447,14 +452,14 @@ class GameEngine:
         if len(active_players) <= 1:
             # Only one player left, they win
             self._end_hand_early()
-            return
+            return False
 
         # Check if only all-in players remain (or at most 1 non-all-in)
         non_all_in = [p for p in active_players if p.status == PlayerStatus.PLAYING]
         if len(non_all_in) <= 1:
             # Run out all community cards
             self._run_out_community_cards()
-            return
+            return False
 
         # Advance phase
         if self.phase == GamePhase.PREFLOP:
@@ -468,7 +473,7 @@ class GameEngine:
             self._deal_river()
         elif self.phase == GamePhase.RIVER:
             self._showdown()
-            return
+            return False
 
         # Set first to act for post-flop rounds
         # In heads-up, BB (non-dealer) acts first post-flop
@@ -487,6 +492,7 @@ class GameEngine:
                 if player.is_in_hand() and player.status != PlayerStatus.ALL_IN:
                     break
         player.is_current = True
+        return True
 
     def _deal_flop(self) -> None:
         """Deal flop (3 community cards)."""

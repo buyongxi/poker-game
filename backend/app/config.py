@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     ACTION_TIMEOUT: int = 30
     RECONNECT_TIMEOUT: int = 5 * 60  # 5 minutes - 断线重连超时
     AUTO_START_DELAY: int = 3  # 自动开始下一手前的延迟（秒）
+    DEALING_DELAY: int = 5  # 每轮发牌后的等待时间（秒），让玩家看清牌面后再开始行动计时
     MAX_CHAT_LENGTH: int = 500  # 聊天消息最大长度
 
     # CORS

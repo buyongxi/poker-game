@@ -39,6 +39,8 @@ class ConnectionManager:
         self.timeout_tasks: Dict[int, asyncio.Task] = {}
         # room_id -> time when current action started
         self.action_start_times: Dict[int, float] = {}
+        # room_id -> last known phase (for detecting dealing)
+        self.last_known_phase: Dict[int, str] = {}
         # Cleanup task for disconnect timeouts
         self.cleanup_task: Optional[asyncio.Task] = None
         self._start_cleanup_task()
@@ -108,19 +110,24 @@ class ConnectionManager:
             self.timeout_tasks[room_id].cancel()
             del self.timeout_tasks[room_id]
 
-    def start_timeout(self, room_id: int, user_id: int, game: GameEngine):
-        """Start a timeout task for the current player."""
+    def start_delayed_timeout(self, room_id: int, user_id: int, game: GameEngine):
+        """Start a timeout task for the current player after a dealing delay."""
         self.cancel_timeout(room_id)
 
-        # Record action start time
-        self.action_start_times[room_id] = time.time()
+        # Record action start time (will be set after delay)
+        self.action_start_times[room_id] = time.time() + game.dealing_delay
 
-        async def timeout_task():
+        async def delayed_timeout_task():
+            # Wait for dealing delay
+            await asyncio.sleep(game.dealing_delay)
+            # Now set the actual action start time
+            self.action_start_times[room_id] = time.time()
+            # Then wait for action timeout
             await asyncio.sleep(game.action_timeout)
             # Timeout occurred - auto fold
             await handle_timeout_fold(room_id, user_id)
 
-        self.timeout_tasks[room_id] = asyncio.create_task(timeout_task())
+        self.timeout_tasks[room_id] = asyncio.create_task(delayed_timeout_task())
 
     def get_remaining_time(self, room_id: int, game: GameEngine) -> Optional[int]:
         """Get remaining time for current action in seconds."""
@@ -204,6 +211,8 @@ class ConnectionManager:
             del self.timeout_tasks[room_id]
         if room_id in self.action_start_times:
             del self.action_start_times[room_id]
+        if room_id in self.last_known_phase:
+            del self.last_known_phase[room_id]
         if room_id in self.game_stop_requested:
             del self.game_stop_requested[room_id]
 
@@ -521,10 +530,28 @@ async def broadcast_game_state(room_id: int):
     """Broadcast game state to all connections."""
     game = manager.get_game(room_id)
     if game:
+        # Get current phase
+        current_phase = game.phase.value if hasattr(game.phase, 'value') else str(game.phase)
+        last_phase = manager.last_known_phase.get(room_id)
+
+        # Detect if we just dealt new cards (phase changed from preflop->flop, flop->turn, turn->river)
+        dealing_phases = {GamePhase.FLOP.value, GamePhase.TURN.value, GamePhase.RIVER.value}
+        just_dealt = (last_phase != current_phase and
+                      last_phase is not None and
+                      current_phase in dealing_phases)
+
+        # Update last known phase
+        manager.last_known_phase[room_id] = current_phase
+
         # Start timeout for current player if game is active (before getting remaining time)
         current_player = game.get_current_player()
         if current_player and game.phase not in [GamePhase.ENDED, GamePhase.SHOWDOWN]:
-            manager.start_timeout(room_id, current_player.user_id, game)
+            if just_dealt:
+                # New cards dealt - use delayed timeout (wait dealing_delay seconds before action timeout)
+                manager.start_delayed_timeout(room_id, current_player.user_id, game)
+            else:
+                # Normal action - start timeout immediately
+                manager.start_timeout(room_id, current_player.user_id, game)
 
         # Get remaining time for current action (after starting timeout)
         remaining_time = manager.get_remaining_time(room_id, game)
@@ -538,6 +565,9 @@ async def broadcast_game_state(room_id: int):
                     state["room_id"] = room_id
                     state["action_timeout"] = game.action_timeout
                     state["remaining_time"] = remaining_time
+                    # Add dealing_delay info for frontend display
+                    if just_dealt and current_player:
+                        state["dealing_delay"] = game.dealing_delay
                     await ws.send_json({
                         "type": "game_state",
                         "data": state
